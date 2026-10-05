@@ -95,6 +95,9 @@ cp blockchain/.env.example blockchain/.env    # then fill in
 cp client/.env.example     client/.env        # then fill in
 
 npm run dev                 # server on :5000, client on :5173
+
+# Create the first administrator (admin is never self-assignable via the API)
+cd server && npm run create-admin -- --email you@example.com --password "yourpassword" --name "Your Name"
 ```
 
 ---
@@ -211,7 +214,148 @@ Service banner. Public.
 { "success": true, "message": "OpenInfra API", "data": { "docs": "/api/health", "version": "0.1.0" } }
 ```
 
-_Auth, report, project, bid and milestone endpoints are documented as their phases land._
+---
+
+## Authentication
+
+All protected endpoints expect a bearer token:
+
+```http
+Authorization: Bearer <token>
+```
+
+Tokens are HS256 JWTs issued by this API (`iss: openinfra-api`), valid for `JWT_EXPIRES_IN`
+(default 7 days). The payload carries `sub` (user id) and `role`. **The `role` claim is a
+UI hint only** — the server re-reads the role from the database on every request, so editing
+a token's claim or deactivating an account takes effect immediately rather than at expiry.
+
+### Roles
+
+| Role | Self-assignable at signup? |
+| --- | --- |
+| `citizen` | yes (default) |
+| `contractor` | yes |
+| `admin` | **no** — created only by `npm run create-admin` |
+
+### `POST /api/auth/register`
+
+Public. Rate limited (failures only).
+
+```json
+{
+  "name": "Asha Citizen",
+  "email": "asha@example.com",
+  "password": "pothole2026",
+  "role": "citizen",
+  "walletAddress": "0x742d...f44e"
+}
+```
+
+`role` and `walletAddress` are optional. Password must be 8–128 characters with at least one
+letter and one number.
+
+**201**
+```json
+{
+  "success": true,
+  "message": "Account created successfully.",
+  "data": {
+    "token": "eyJhbGciOiJIUzI1NiIs...",
+    "user": {
+      "id": "6ac3e283fd2b6c9f44e29a7f",
+      "name": "Asha Citizen",
+      "email": "asha@example.com",
+      "role": "citizen",
+      "walletAddress": null,
+      "avatarUrl": null,
+      "isActive": true,
+      "lastLoginAt": null,
+      "createdAt": "2026-10-05T17:46:43.234Z"
+    }
+  }
+}
+```
+
+Errors: **422** validation (includes `role: "admin"`), **409** email already registered.
+
+### `POST /api/auth/login`
+
+Public. Rate limited (failures only).
+
+```json
+{ "email": "asha@example.com", "password": "pothole2026" }
+```
+
+**200** — same `{ token, user }` shape as register.
+
+**401** — `"Incorrect email or password."` for both a wrong password *and* an unknown email,
+so the endpoint cannot be used to discover which addresses have accounts.
+
+### `POST /api/auth/logout`
+
+Public. JWTs are stateless, so this only tells the client to discard its token.
+
+### `GET /api/auth/me`
+
+Requires a token. Returns `{ user }` for the token's own account.
+
+### `PATCH /api/auth/wallet`
+
+Requires a token. Sets the caller's Ethereum payout address.
+
+```json
+{ "walletAddress": "0x742D35CC6634C0532925A3B844BC454E4438F44E" }
+```
+
+Stored lowercased. **409** if another account already claims that address — two contractors
+sharing one address would make an on-chain payout ambiguous to audit.
+
+### `GET /api/auth/users`
+
+**Admin only.** Paginated user directory.
+
+Query: `?role=contractor&page=1&limit=20` (limit capped at 100).
+
+```json
+{
+  "success": true,
+  "message": "Users retrieved.",
+  "data": { "users": [ ] },
+  "meta": { "total": 7, "page": 1, "limit": 20, "pages": 1 }
+}
+```
+
+**403** for any non-admin, with a message naming the required role.
+
+### `GET /api/auth/google`
+
+Public. Starts the OAuth handshake and redirects to Google.
+
+Query: `?role=contractor` — the requested role rides along in the OAuth `state` parameter
+and is applied when the account is first created. Anything other than `citizen` or
+`contractor` is coerced to `citizen`.
+
+**503** if `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` are not configured.
+
+### `GET /api/auth/google/callback`
+
+Public. Google redirects here. Never returns JSON — always a redirect back to the SPA.
+
+| Outcome | Redirect |
+| --- | --- |
+| Success | `{CLIENT_URL}/auth/callback#token=<jwt>&role=<role>` |
+| Cancelled / failed | `{CLIENT_URL}/login?error=<message>` |
+
+The token is returned in the URL **fragment**, not the query string. Fragments are never sent
+to a server, keeping the token out of access logs, proxy logs and the `Referer` header. The
+frontend reads `location.hash` and clears it with `history.replaceState`.
+
+**Account linking:** if the Google email matches an existing local account, the Google
+identity is attached to that account rather than creating a duplicate. The existing password
+keeps working, and the existing role is preserved — signing in with `?role=contractor` cannot
+change an established account's role.
+
+_Report, project, bid and milestone endpoints are documented as their phases land._
 
 ---
 
@@ -227,7 +371,7 @@ _Coming in Phase 6._
 
 - [x] **Phase 0** — Monorepo setup, git identity, `.gitignore`, `.env.example` files, tooling
 - [x] **Phase 1** — Backend foundation (Express, Mongo, error handling, health check)
-- [ ] **Phase 2** — Authentication & roles (JWT + Google OAuth + RBAC)
+- [x] **Phase 2** — Authentication & roles (JWT + Google OAuth + RBAC)
 - [ ] **Phase 3** — Citizen reporting + Gemini relevance gate + cost estimate
 - [ ] **Phase 4** — Admin review & project publishing
 - [ ] **Phase 5** — Bidding + 20% anomaly detection

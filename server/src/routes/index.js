@@ -4,12 +4,12 @@
  */
 import { Router } from 'express';
 import healthRoutes from './health.routes.js';
+import authRoutes from './auth.routes.js';
 
 const router = Router();
 
 router.use('/health', healthRoutes);
-
-// Phase 2: router.use('/auth', authRoutes);
+router.use('/auth', authRoutes);
 // Phase 3: router.use('/reports', reportRoutes);
 // Phase 4: router.use('/projects', projectRoutes);
 // Phase 5: router.use('/bids', bidRoutes);

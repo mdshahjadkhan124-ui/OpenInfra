@@ -16,6 +16,8 @@ import morgan from 'morgan';
 import compression from 'compression';
 import rateLimit from 'express-rate-limit';
 
+import { initPassport } from './config/passport.js';
+
 import { config } from './config/env.js';
 import apiRoutes from './routes/index.js';
 import { errorHandler, notFoundHandler } from './middlewares/errorHandler.js';
@@ -63,6 +65,10 @@ export const createApp = () => {
   app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
   app.use(compression());
+
+  // Passport is used statelessly (no sessions) — it only runs the Google
+  // OAuth handshake, after which we issue our own JWT.
+  app.use(initPassport().initialize());
 
   // --- Request logging ---------------------------------------------------
   if (!config.isTest) {
