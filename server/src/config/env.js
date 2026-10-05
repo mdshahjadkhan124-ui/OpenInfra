@@ -90,7 +90,17 @@ export const config = Object.freeze({
     ...gemini,
     apiKey: read('GEMINI_API_KEY'),
     // Vision-capable model used for both the relevance gate and milestone verification.
-    model: read('GEMINI_MODEL', 'gemini-2.0-flash'),
+    model: read('GEMINI_MODEL', 'gemini-2.5-flash'),
+  }),
+
+  /**
+   * Reporting context. The AI estimate is only meaningful against a currency
+   * and a market, so both are configurable rather than hardcoded in the prompt.
+   */
+  report: Object.freeze({
+    currency: read('REPORT_CURRENCY', 'INR'),
+    region: read('REPORT_REGION', 'India'),
+    maxUploadMb: Number.parseInt(read('MAX_UPLOAD_MB', '10'), 10),
   }),
 
   cloudinary: Object.freeze({

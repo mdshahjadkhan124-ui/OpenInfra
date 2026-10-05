@@ -355,7 +355,124 @@ identity is attached to that account rather than creating a duplicate. The exist
 keeps working, and the existing role is preserved — signing in with `?role=contractor` cannot
 change an established account's role.
 
-_Report, project, bid and milestone endpoints are documented as their phases land._
+---
+
+## Reports
+
+### `POST /api/reports`
+
+**Citizen only.** `multipart/form-data`. Rate limited per user (AI + storage cost).
+
+| Field | Required | Notes |
+| --- | --- | --- |
+| `image` | yes | JPEG, PNG, WebP or HEIC. Max `MAX_UPLOAD_MB` (default 10). |
+| `description` | yes | 10–1000 characters. |
+| `address` | yes | 3–300 characters. |
+| `city` | no | |
+| `latitude` / `longitude` | no | Decimal degrees. |
+
+```bash
+curl -X POST http://localhost:5000/api/reports   -H "Authorization: Bearer <token>"   -F image=@pothole.jpg   -F "description=Deep pothole in the carriageway, two-wheelers are swerving."   -F "address=14 MG Road, Bengaluru"   -F "city=Bengaluru" -F "latitude=12.9716" -F "longitude=77.5946"
+```
+
+The request returns **201 whether or not the AI accepts the photo** — a report document
+was created either way, and the verdict is carried in `status`. Returning an error for
+"this is not infrastructure" would conflate a client mistake with a judgement the system
+made and recorded.
+
+**201 — accepted** (`status: "pending"`)
+```json
+{
+  "success": true,
+  "message": "Report submitted. Our AI has estimated the repair cost and an official will review it shortly.",
+  "data": {
+    "report": {
+      "id": "6ac3ebd3b429b13e1ae2329d",
+      "status": "pending",
+      "imageUrl": "https://res.cloudinary.com/.../openinfra/reports/abc123.jpg",
+      "location": { "address": "14 MG Road, Bengaluru", "city": "Bengaluru", "latitude": 12.9716, "longitude": 77.5946 },
+      "description": "Deep pothole in the carriageway...",
+      "aiRelevanceResult": {
+        "isRelevant": true,
+        "category": "road_damage",
+        "confidence": 1,
+        "reason": "The image clearly shows a damaged public road surface.",
+        "model": "gemini-2.5-flash",
+        "latencyMs": 9120
+      },
+      "aiCostEstimate": {
+        "amount": 10500,
+        "currency": "INR",
+        "severity": "high",
+        "observedIssue": "A large, deep pothole has formed in the asphalt carriageway...",
+        "breakdown": [
+          { "item": "Site preparation, cutting, and debris removal", "cost": 700 },
+          { "item": "Hot mix asphalt (approx. 0.72 tons) and tack coat", "cost": 7350 },
+          { "item": "Compaction, finishing, and equipment use", "cost": 750 },
+          { "item": "Traffic management (cones, signage)", "cost": 500 },
+          { "item": "Contingency and overheads", "cost": 1200 }
+        ],
+        "assumptions": ["Pothole dimensions assumed to be approximately 1.5m x 1m x 0.2m deep.", "..."],
+        "confidence": 0.8,
+        "model": "gemini-2.5-flash"
+      },
+      "rejectionSource": null,
+      "rejectionReason": null,
+      "createdAt": "2026-10-05T18:21:07.133Z"
+    }
+  }
+}
+```
+
+**201 — auto-rejected** (`status: "rejected"`)
+```json
+{
+  "success": true,
+  "message": "We reviewed your photo but could not accept it as an infrastructure report.",
+  "data": {
+    "report": {
+      "status": "rejected",
+      "rejectionSource": "ai_relevance_gate",
+      "rejectionReason": "This image shows a cat in a costume, which is not public civic infrastructure. Please submit photos of damaged roads, footpaths, or other public facilities.",
+      "aiCostEstimate": null,
+      "aiRelevanceResult": { "isRelevant": false, "category": "not_infrastructure", "confidence": 1 }
+    }
+  }
+}
+```
+
+`aiCostEstimate` is `null` — never a fake zero — so no fictional benchmark can leak into
+the bid-anomaly logic. The image is still stored, because the AI can be wrong and a citizen
+appealing an auto-rejection needs the photo to exist.
+
+Errors: **400** missing or non-image file · **422** field validation · **403** non-citizen ·
+**503** Gemini or Cloudinary unavailable or unconfigured.
+
+### `GET /api/reports/mine`
+
+Requires a token. The caller's own reports, newest first.
+Query: `?status=pending&page=1&limit=20`.
+
+### `GET /api/reports/mine/stats`
+
+Requires a token. Counts by status for the citizen dashboard.
+
+```json
+{ "data": { "stats": { "total": 4, "pending": 2, "approved": 0, "rejected": 2, "published": 0 } } }
+```
+
+### `GET /api/reports/:id`
+
+Owner or admin only. Anyone else gets **404**, not 403 — confirming a report exists at an
+id would leak that someone else filed one.
+
+### `DELETE /api/reports/:id`
+
+Owner only, and only while `pending` or `rejected`. An approved or published report is part
+of a public record a bid or a funded project may reference, so deleting it returns **403**.
+Deleting also removes the Cloudinary asset.
+
+_Project, bid and milestone endpoints are documented as their phases land._
 
 ---
 
@@ -372,7 +489,7 @@ _Coming in Phase 6._
 - [x] **Phase 0** — Monorepo setup, git identity, `.gitignore`, `.env.example` files, tooling
 - [x] **Phase 1** — Backend foundation (Express, Mongo, error handling, health check)
 - [x] **Phase 2** — Authentication & roles (JWT + Google OAuth + RBAC)
-- [ ] **Phase 3** — Citizen reporting + Gemini relevance gate + cost estimate
+- [x] **Phase 3** — Citizen reporting + Gemini relevance gate + cost estimate
 - [ ] **Phase 4** — Admin review & project publishing
 - [ ] **Phase 5** — Bidding + 20% anomaly detection
 - [ ] **Phase 6** — Solidity staged escrow on Sepolia
