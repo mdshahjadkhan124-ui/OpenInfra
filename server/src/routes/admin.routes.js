@@ -7,6 +7,7 @@
 import { Router } from 'express';
 
 import * as adminController from '../controllers/admin.controller.js';
+import * as bidController from '../controllers/bid.controller.js';
 import { authenticate, authorize } from '../middlewares/auth.js';
 import { validate } from '../middlewares/validate.js';
 import { ROLES } from '../models/User.js';
@@ -16,6 +17,7 @@ import {
   rejectReportRules,
   publishReportRules,
 } from '../validators/admin.validators.js';
+import { awardRules, listBidsRules } from '../validators/bid.validators.js';
 
 const router = Router();
 
@@ -29,5 +31,9 @@ router.get('/reports', validate(reviewQueueRules), adminController.listReportsFo
 router.patch('/reports/:id/approve', validate(mongoIdRules), adminController.approveReport);
 router.patch('/reports/:id/reject', validate(rejectReportRules), adminController.rejectReport);
 router.post('/reports/:id/publish', validate(publishReportRules), adminController.publishReport);
+
+// --- Bid review & award (Phase 5) ---------------------------------------
+router.get('/projects/:id/bids', validate([...mongoIdRules, ...listBidsRules]), bidController.listBidsForProject);
+router.post('/projects/:id/award', validate(awardRules), bidController.awardProject);
 
 export default router;

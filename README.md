@@ -648,7 +648,140 @@ Requires a token. **404** if unknown.
 > wei**: `Number` cannot hold 1e18 safely and Mongoose has no native bigint, so the chain
 > layer parses them with `BigInt()`.
 
-_Bid and milestone endpoints are documented as their phases land._
+---
+
+## Bidding & anomaly detection
+
+### `POST /api/bids`
+
+**Contractor only.**
+
+```json
+{
+  "projectId": "6ac3f4de25f39e11c0f1a621",
+  "bidAmount": 14500,
+  "proposal": "Full-depth patch with hot mix, two-day closure.",
+  "estimatedDays": 3,
+  "walletAddress": "0x742d...f44e"
+}
+```
+
+`walletAddress` falls back to the account's. **One of the two is required** — milestone
+funds are released to it on-chain, and discovering it missing after the escrow is funded
+would strand the money.
+
+A flagged bid is still **accepted (201)**. Flagging is a signal to the admin, not a
+rejection: the contractor may know something the photo did not show, and refusing the
+submission would hide that from the record. The response says so plainly, and the
+contractor is told their bid was flagged.
+
+**201**
+```json
+{
+  "data": { "bid": {
+    "id": "6ac3f778cda32cb3e1623f44",
+    "bidAmount": 25600,
+    "currency": "INR",
+    "status": "pending",
+    "isFlagged": true,
+    "walletAddress": "0x742d...f44e",
+    "anomaly": {
+      "band": "flagged",
+      "benchmarkAmount": 16000,
+      "expectedAmount": 10500,
+      "thresholdAmount": 19200,
+      "marginPercent": 20,
+      "deviationPercent": 60,
+      "deviationFromExpectedPercent": 143.81,
+      "basis": "max_estimate",
+      "explanation": "Bid of INR 25,600 exceeds the upper assessed cost of INR 16,000 by 60%, beyond the 20% allowance (threshold INR 19,200)."
+    }
+  } }
+}
+```
+
+The verdict is **frozen onto the bid**, not computed on read. A flag is an accusation with a
+timestamp: the benchmark and margin that produced it must be preserved, or a later change to
+either would silently rewrite history — and a contractor disputing a flag deserves to see the
+exact figures used against them.
+
+Errors: **400** no wallet · **404** unknown project · **409** project not open / deadline
+passed / already has a live bid from this contractor · **403** citizen or admin, or bidding
+on a project from your own report · **422** validation.
+
+### `GET /api/bids/mine`
+
+Contractor only. Their own bids, newest first. Filters: `status`, `page`, `limit`.
+
+### `PATCH /api/bids/:id/withdraw`
+
+Contractor only, own pending bid. **409** if accepted or already withdrawn. **404** for
+someone else's bid — confirming it exists would leak a competitor's activity.
+
+One live bid per contractor per project, enforced by a partial unique index on
+`{project, contractor}` over `pending`/`accepted`. Withdrawing frees a resubmission;
+stacking several pending bids to game the comparison is not possible.
+
+### `GET /api/admin/projects/:id/bids`
+
+**Admin only.** Every bid, sorted **flagged-first, then cheapest** — the admin's job is to
+spot anomalies, so they lead; within each group the cheapest offer is the likeliest award.
+
+```json
+{
+  "data": {
+    "project": { "id": "...", "status": "open", "biddingBenchmark": 16000, "isAcceptingBids": true },
+    "bids": [ ],
+    "summary": { "total": 12, "live": 11, "flagged": 3, "lowest": 7000, "highest": 40000 }
+  }
+}
+```
+
+### `POST /api/admin/projects/:id/award`
+
+**Admin only.**
+
+```json
+{ "bidId": "6ac3f778cda32cb3e1623f44" }
+```
+
+Sets the project to `awarded`, records `awardedContractor`, `awardedBid`, `awardedAmount`
+and `awardedAt`, and rejects every other pending bid. Awarding a **flagged** bid is allowed —
+an official may have good reason — but the response says so explicitly.
+
+**Transactional.** The winning bid, every losing bid and the project must all move together:
+a partial application would leave a project awarded with no accepted bid, or two accepted
+bids on one project — and the next step locks real funds against this decision.
+
+**No funds are locked here.** The escrow fields stay at their defaults
+(`totalLockedFunds: "0"`, `smartContractAddress: null`) for Phase 6 to fill when the admin's
+wallet actually deposits. The response carries a `nextStep` saying so.
+
+Errors: **404** unknown project or bid · **400** bid belongs to another project · **409**
+project not open / bid not pending / already awarded · **422** missing `bidId` or bid has no
+payout wallet.
+
+### Deviation scoring in practice
+
+With a frozen estimate of **min 7,000 / expected 10,500 / max 16,000 INR** and the default
+20% margin (threshold **19,200**):
+
+| Bid | Band | Flagged |
+| --- | --- | --- |
+| 7,000 | `none` | no |
+| 13,250 | `none` | no |
+| 16,000 (at the bound) | `none` | no |
+| 17,600 | `elevated` | no |
+| 19,200 (at the threshold) | `elevated` | no |
+| 19,201 | `flagged` | **yes** |
+| 25,600 | `flagged` | **yes** |
+| 40,000 (>2× bound) | `severe` | **yes** |
+
+A bid of **13,125** is **+25% over the expected value** — a naive point-estimate rule would
+flag it — but **−18% against the upper bound**, so it is clean. That false accusation is
+exactly what scoring against the range avoids.
+
+_Milestone endpoints are documented as their phases land._
 
 ---
 
@@ -667,7 +800,7 @@ _Coming in Phase 6._
 - [x] **Phase 2** — Authentication & roles (JWT + Google OAuth + RBAC)
 - [x] **Phase 3** — Citizen reporting + Gemini relevance gate + cost estimate
 - [x] **Phase 4** — Admin review & project publishing
-- [ ] **Phase 5** — Bidding + 20% anomaly detection
+- [x] **Phase 5** — Bidding + 20% anomaly detection
 - [ ] **Phase 6** — Solidity staged escrow on Sepolia
 - [ ] **Phase 7** — Milestones + AI verification + fund release
 - [ ] **Phase 8** — Consolidated notification service

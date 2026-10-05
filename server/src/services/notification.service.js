@@ -202,9 +202,130 @@ export const projectOpenForBids = ({ contractors, project }) =>
   );
 
 // ---------------------------------------------------------------------------
+// Phase 5 — bidding & award
+// ---------------------------------------------------------------------------
+
+const money = (amount, currency) => ({ amount, currency });
+
+/** Confirmation to the contractor that their bid landed. */
+export const bidSubmitted = ({ contractor, project, bid }) =>
+  safeDispatch({
+    event: 'bid.submitted',
+    to: contractor.email,
+    subject: `Bid received for ${project.title}`,
+    data: {
+      name: contractor.name,
+      projectId: project.id,
+      title: project.title,
+      bid: money(bid.bidAmount, bid.currency),
+      // Told plainly, so a contractor is never surprised by a flag later.
+      flagged: bid.isFlagged,
+      anomalyExplanation: bid.anomaly?.explanation,
+      link: appUrl(`/contractor/bids/${bid.id}`),
+    },
+  });
+
+/** A new bid is in; admins are told regardless of band. */
+export const bidReceived = ({ admins, project, bid, contractor }) =>
+  Promise.all(
+    admins.map((admin) =>
+      safeDispatch({
+        event: 'bid.received',
+        to: admin.email,
+        subject: `New bid on ${project.title}`,
+        data: {
+          name: admin.name,
+          projectId: project.id,
+          title: project.title,
+          contractorName: contractor.name,
+          bid: money(bid.bidAmount, bid.currency),
+          benchmark: money(bid.anomaly?.benchmarkAmount, bid.currency),
+          band: bid.anomaly?.band,
+          link: appUrl(`/admin/projects/${project.id}/bids`),
+        },
+      })
+    )
+  );
+
+/**
+ * A bid breached the anomaly threshold.
+ *
+ * Sent as its own event rather than a flag on bid.received, so it can be
+ * routed differently later — digest the routine ones, alert on these.
+ */
+export const bidFlagged = ({ admins, project, bid, contractor }) =>
+  Promise.all(
+    admins.map((admin) =>
+      safeDispatch({
+        event: 'bid.flagged',
+        to: admin.email,
+        subject: `Anomalous bid flagged on ${project.title}`,
+        data: {
+          name: admin.name,
+          projectId: project.id,
+          title: project.title,
+          contractorName: contractor.name,
+          bid: money(bid.bidAmount, bid.currency),
+          band: bid.anomaly?.band,
+          benchmark: money(bid.anomaly?.benchmarkAmount, bid.currency),
+          threshold: money(bid.anomaly?.thresholdAmount, bid.currency),
+          deviationPercent: bid.anomaly?.deviationPercent,
+          explanation: bid.anomaly?.explanation,
+          link: appUrl(`/admin/projects/${project.id}/bids`),
+        },
+      })
+    )
+  );
+
+/** The winning contractor. */
+export const projectAwarded = ({ contractor, project, bid }) =>
+  safeDispatch({
+    event: 'project.awarded',
+    to: contractor.email,
+    subject: `You have been awarded: ${project.title}`,
+    data: {
+      name: contractor.name,
+      projectId: project.id,
+      title: project.title,
+      awarded: money(bid.bidAmount, bid.currency),
+      walletAddress: bid.walletAddress,
+      link: appUrl(`/contractor/projects/${project.id}`),
+    },
+  });
+
+/** Everyone who did not win. */
+export const bidNotSelected = ({ contractor, project, bid }) =>
+  safeDispatch({
+    event: 'bid.not_selected',
+    to: contractor.email,
+    subject: `Outcome of your bid for ${project.title}`,
+    data: {
+      name: contractor.name,
+      projectId: project.id,
+      title: project.title,
+      bid: money(bid.bidAmount, bid.currency),
+      link: appUrl(`/contractor/bids/${bid.id}`),
+    },
+  });
+
+/** The citizen who reported the problem learns work has been commissioned. */
+export const projectAwardedToReporter = ({ user, project, bid }) =>
+  safeDispatch({
+    event: 'project.awarded_reporter',
+    to: user.email,
+    subject: `Work has been commissioned for your report`,
+    data: {
+      name: user.name,
+      projectId: project.id,
+      title: project.title,
+      awarded: money(bid.bidAmount, bid.currency),
+      link: appUrl(`/transparency/projects/${project.id}`),
+    },
+  });
+
+// ---------------------------------------------------------------------------
 // Later phases — signatures land with the feature that fires them.
 //
-//   Phase 5: bidReceived, bidFlagged, projectAwarded
 //   Phase 7: milestoneSubmitted, milestoneApproved (with Etherscan link),
 //            projectCompleted
 // ---------------------------------------------------------------------------
@@ -217,6 +338,12 @@ export const notify = {
   reportRejectedByAdmin,
   projectPublished,
   projectOpenForBids,
+  bidSubmitted,
+  bidReceived,
+  bidFlagged,
+  projectAwarded,
+  bidNotSelected,
+  projectAwardedToReporter,
 };
 
 export default notify;
