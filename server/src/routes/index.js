@@ -6,13 +6,16 @@ import { Router } from 'express';
 import healthRoutes from './health.routes.js';
 import authRoutes from './auth.routes.js';
 import reportRoutes from './report.routes.js';
+import adminRoutes from './admin.routes.js';
+import projectRoutes from './project.routes.js';
 
 const router = Router();
 
 router.use('/health', healthRoutes);
 router.use('/auth', authRoutes);
 router.use('/reports', reportRoutes);
-// Phase 4: router.use('/projects', projectRoutes);
+router.use('/admin', adminRoutes);
+router.use('/projects', projectRoutes);
 // Phase 5: router.use('/bids', bidRoutes);
 // Phase 7: router.use('/milestones', milestoneRoutes);
 // Phase 10: router.use('/public', publicRoutes);

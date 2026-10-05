@@ -538,7 +538,117 @@ response. Mocked uploads return a stable fake Cloudinary URL derived from the sa
 
 Only final phase verification hits the real APIs.
 
-_Project, bid and milestone endpoints are documented as their phases land._
+---
+
+## Admin review & projects
+
+All `/api/admin/*` routes require the **admin** role. The guard is applied once at the
+router level, so a route added later cannot accidentally ship unprotected.
+
+### `GET /api/admin/reports`
+
+The review queue. Defaults to `status=pending`; pass `approved`, `rejected`, `published`
+or `all` to audit — including what the AI rejected.
+
+### `GET /api/admin/stats`
+
+Counts for the dashboard header.
+
+```json
+{
+  "data": { "stats": {
+    "reports":  { "total": 6, "pending": 4, "approved": 0, "rejected": 2, "published": 0 },
+    "projects": { "total": 2, "open": 2, "awarded": 0, "inProgress": 0, "completed": 0 }
+  } }
+}
+```
+
+### `PATCH /api/admin/reports/:id/approve`
+
+Approves a report. **Also accepts an AI-rejected report** — the relevance gate is a filter,
+not a verdict, and Phase 3 deliberately keeps the image so a wrong auto-rejection can be
+overturned. An overturned report carries no AI estimate, so publishing it will require a
+manual one.
+
+Errors: **409** already approved or already published.
+
+### `PATCH /api/admin/reports/:id/reject`
+
+```json
+{ "reason": "This street light is on private land and falls outside municipal responsibility." }
+```
+
+`reason` is required (10–500 chars) because it is shown verbatim to the citizen. Sets
+`rejectionSource: "admin_review"`, keeping human decisions distinguishable from the AI gate.
+
+### `POST /api/admin/reports/:id/publish`
+
+Publishes an **approved** report as an open project. Body is optional:
+
+| Field | Notes |
+| --- | --- |
+| `title` | defaults to a generated one, e.g. *"Road Damage repair — 14 MG Road, Bengaluru"* |
+| `description` | defaults to the report's |
+| `bidsCloseAt` | ISO 8601, must be in the future |
+| `estimate` | `{ minAmount, amount, maxAmount }` — overrides the AI range |
+
+`estimate` is **required** when the report has no AI estimate (the overturned-rejection
+case); without a benchmark Phase 5 could not score any bid. Bounds must satisfy
+`minAmount ≤ amount ≤ maxAmount` and `maxAmount > 0`.
+
+**201**
+```json
+{
+  "data": { "project": {
+    "id": "6ac3f4de25f39e11c0f1a621",
+    "title": "Road Damage repair — 14 MG Road, Bengaluru",
+    "status": "open",
+    "category": "road_damage",
+    "aiEstimatedCost": {
+      "minAmount": 7000, "amount": 10500, "maxAmount": 16000, "currency": "INR",
+      "source": "ai_vision_estimate", "producedBy": "gemini-2.5-flash"
+    },
+    "biddingBenchmark": 16000,
+    "isAcceptingBids": true,
+    "totalLockedFunds": "0",
+    "totalReleasedFunds": "0",
+    "smartContractAddress": null,
+    "awardedContractor": null
+  } }
+}
+```
+
+Errors: **409** report not approved / already published · **422** missing or invalid estimate.
+
+**Publication is transactional.** Creating the Project and flipping the Report to
+`published` happen together or not at all — a Project whose Report still read `approved`
+would reappear in the review queue and could be published twice. A unique index on
+`report` is the backstop.
+
+**The estimate is copied onto the project, not referenced through it.** It is the benchmark
+bids are judged against and the basis on which a contractor may be publicly flagged. Read
+live, re-analysing the underlying report would retroactively change what bidders were
+measured against. Freezing it at publication makes the record defensible after the fact.
+`source` records whether the figure came from the AI or an admin override.
+
+### `GET /api/projects`
+
+Requires a token. Defaults to `status=open` — the contractor's board. Filters: `status`
+(or `all`), `category`, `page`, `limit`.
+
+### `GET /api/projects/mine`
+
+Projects awarded to the calling contractor.
+
+### `GET /api/projects/:id`
+
+Requires a token. **404** if unknown.
+
+> Escrow denominations (`totalLockedFunds`, `totalReleasedFunds`) are decimal **strings in
+> wei**: `Number` cannot hold 1e18 safely and Mongoose has no native bigint, so the chain
+> layer parses them with `BigInt()`.
+
+_Bid and milestone endpoints are documented as their phases land._
 
 ---
 
@@ -556,7 +666,7 @@ _Coming in Phase 6._
 - [x] **Phase 1** — Backend foundation (Express, Mongo, error handling, health check)
 - [x] **Phase 2** — Authentication & roles (JWT + Google OAuth + RBAC)
 - [x] **Phase 3** — Citizen reporting + Gemini relevance gate + cost estimate
-- [ ] **Phase 4** — Admin review & project publishing
+- [x] **Phase 4** — Admin review & project publishing
 - [ ] **Phase 5** — Bidding + 20% anomaly detection
 - [ ] **Phase 6** — Solidity staged escrow on Sepolia
 - [ ] **Phase 7** — Milestones + AI verification + fund release

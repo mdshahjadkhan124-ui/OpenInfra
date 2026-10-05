@@ -111,9 +111,99 @@ export const reportAwaitingReview = ({ admins, report }) =>
   );
 
 // ---------------------------------------------------------------------------
+// Phase 4 — admin review & publication
+// ---------------------------------------------------------------------------
+
+/** An admin approved the report; it is eligible to become a public project. */
+export const reportApproved = ({ user, report }) =>
+  safeDispatch({
+    event: 'report.approved',
+    to: user.email,
+    subject: 'Your infrastructure report has been approved',
+    data: {
+      name: user.name,
+      reportId: report.id,
+      location: report.location?.address,
+      estimate: report.aiCostEstimate
+        ? {
+            min: report.aiCostEstimate.minAmount,
+            expected: report.aiCostEstimate.amount,
+            max: report.aiCostEstimate.maxAmount,
+            currency: report.aiCostEstimate.currency,
+          }
+        : null,
+      link: appUrl(`/reports/${report.id}`),
+    },
+  });
+
+/**
+ * An admin rejected the report.
+ *
+ * Distinct from `report.rejected`, which is the AI relevance gate: this one
+ * was a human decision and the citizen deserves to be told which it was.
+ */
+export const reportRejectedByAdmin = ({ user, report, reason }) =>
+  safeDispatch({
+    event: 'report.rejected_by_admin',
+    to: user.email,
+    subject: 'An update on your infrastructure report',
+    data: {
+      name: user.name,
+      reportId: report.id,
+      reason,
+      link: appUrl(`/reports/${report.id}`),
+    },
+  });
+
+/** The citizen's report is now a public project open for bidding. */
+export const projectPublished = ({ user, project }) =>
+  safeDispatch({
+    event: 'project.published',
+    to: user.email,
+    subject: 'Your report is now an open public project',
+    data: {
+      name: user.name,
+      projectId: project.id,
+      title: project.title,
+      estimate: {
+        min: project.aiEstimatedCost.minAmount,
+        expected: project.aiEstimatedCost.amount,
+        max: project.aiEstimatedCost.maxAmount,
+        currency: project.aiEstimatedCost.currency,
+      },
+      link: appUrl(`/transparency/projects/${project.id}`),
+    },
+  });
+
+/** Contractors are told a new project is open for bids. */
+export const projectOpenForBids = ({ contractors, project }) =>
+  Promise.all(
+    contractors.map((contractor) =>
+      safeDispatch({
+        event: 'project.open_for_bids',
+        to: contractor.email,
+        subject: `New public project open for bidding: ${project.title}`,
+        data: {
+          name: contractor.name,
+          projectId: project.id,
+          title: project.title,
+          location: project.location?.address,
+          estimate: {
+            min: project.aiEstimatedCost.minAmount,
+            expected: project.aiEstimatedCost.amount,
+            max: project.aiEstimatedCost.maxAmount,
+            currency: project.aiEstimatedCost.currency,
+          },
+          bidsCloseAt: project.bidsCloseAt,
+          link: appUrl(`/contractor/projects/${project.id}`),
+        },
+      })
+    )
+  );
+
+// ---------------------------------------------------------------------------
 // Later phases — signatures land with the feature that fires them.
 //
-//   Phase 4: reportApproved, projectPublished
 //   Phase 5: bidReceived, bidFlagged, projectAwarded
 //   Phase 7: milestoneSubmitted, milestoneApproved (with Etherscan link),
 //            projectCompleted
@@ -123,6 +213,10 @@ export const notify = {
   reportReceived,
   reportRejected,
   reportAwaitingReview,
+  reportApproved,
+  reportRejectedByAdmin,
+  projectPublished,
+  projectOpenForBids,
 };
 
 export default notify;
