@@ -64,6 +64,15 @@ if (missingCore.length > 0) {
 // ---------------------------------------------------------------------------
 // Feature groups — optional at boot, validated at point of use
 // ---------------------------------------------------------------------------
+/**
+ * Fixture mode. External calls (Gemini, Cloudinary) are replaced by
+ * deterministic canned responses. Always on under NODE_ENV=test so the suite
+ * never spends API quota, and switchable in development via MOCK_EXTERNAL.
+ */
+const mockAll = isTest || read('MOCK_EXTERNAL', 'false') === 'true';
+const mockAi = mockAll || read('MOCK_AI', 'false') === 'true';
+const mockUploads = mockAll || read('MOCK_UPLOADS', 'false') === 'true';
+
 const gemini = group(['GEMINI_API_KEY']);
 const cloudinary = group(['CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET']);
 const googleOAuth = group(['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_CALLBACK_URL']);
@@ -88,6 +97,9 @@ export const config = Object.freeze({
 
   gemini: Object.freeze({
     ...gemini,
+    // A mocked integration is "ready" regardless of keys — nothing is called.
+    ready: mockAi || gemini.ready,
+    mock: mockAi,
     apiKey: read('GEMINI_API_KEY'),
     // Vision-capable model used for both the relevance gate and milestone verification.
     model: read('GEMINI_MODEL', 'gemini-2.5-flash'),
@@ -103,8 +115,21 @@ export const config = Object.freeze({
     maxUploadMb: Number.parseInt(read('MAX_UPLOAD_MB', '10'), 10),
   }),
 
+  /**
+   * Bid anomaly detection (Phase 5).
+   *
+   * A bid is flagged when it exceeds the AI estimate's UPPER bound by more
+   * than this margin. Scoring against maxCost rather than a point estimate is
+   * deliberate — see docs in services/gemini.service.js on estimate variance.
+   */
+  bidding: Object.freeze({
+    anomalyMarginPercent: Number.parseFloat(read('ANOMALY_MARGIN_PERCENT', '20')),
+  }),
+
   cloudinary: Object.freeze({
     ...cloudinary,
+    ready: mockUploads || cloudinary.ready,
+    mock: mockUploads,
     cloudName: read('CLOUDINARY_CLOUD_NAME'),
     apiKey: read('CLOUDINARY_API_KEY'),
     apiSecret: read('CLOUDINARY_API_SECRET'),
@@ -135,8 +160,8 @@ export const config = Object.freeze({
 
 /** Feature groups that are not yet configured — logged once at boot. */
 export const unconfiguredFeatures = Object.entries({
-  Gemini: gemini,
-  Cloudinary: cloudinary,
+  Gemini: mockAi ? { ready: true, missing: [] } : gemini,
+  Cloudinary: mockUploads ? { ready: true, missing: [] } : cloudinary,
   'Google OAuth': googleOAuth,
   Email: email,
   Blockchain: chain,

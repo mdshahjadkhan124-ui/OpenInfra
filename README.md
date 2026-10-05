@@ -402,6 +402,8 @@ made and recorded.
       },
       "aiCostEstimate": {
         "amount": 10500,
+        "minAmount": 7000,
+        "maxAmount": 16000,
         "currency": "INR",
         "severity": "high",
         "observedIssue": "A large, deep pothole has formed in the asphalt carriageway...",
@@ -471,6 +473,70 @@ id would leak that someone else filed one.
 Owner only, and only while `pending` or `rejected`. An approved or published report is part
 of a public record a bid or a funded project may reference, so deleting it returns **403**.
 Deleting also removes the Cloudinary asset.
+
+---
+
+## Why the cost estimate is a range
+
+`aiCostEstimate` stores three figures — `minAmount`, `amount` (expected) and `maxAmount` —
+rather than one.
+
+A photograph carries no measuring reference, so the model cannot pin down the damage's
+physical size. Measured over six runs of an **identical** photo and description, a single
+point estimate ranged from **₹3,000 to ₹14,000** (coefficient of variation ~60%). The model's
+own `assumptions` showed exactly why: it re-guessed the pothole as anywhere from
+"50 cm × 40 cm" to "1.8 m × 1.0 m" — a ~9× area difference, and cost follows area.
+
+That spread is not noise to suppress; it is real uncertainty about scale, and a point
+estimate merely hides it. It also broke the feature that depends on it: Phase 5 flags bids
+more than 20% above the estimate, and a benchmark swinging 160% cannot support a 20%
+threshold.
+
+So the model is asked for what it actually knows — a plausible range under stated
+assumptions — and **bid anomaly detection scores against `maxAmount`**:
+
+```
+flagged  ⟺  bid > maxAmount × (1 + ANOMALY_MARGIN_PERCENT/100)
+```
+
+| Band | Condition | Flagged? |
+| --- | --- | --- |
+| `none` | bid ≤ `maxAmount` | no |
+| `elevated` | above `maxAmount`, within the margin | no — shown to the admin |
+| `flagged` | past the threshold | **yes** |
+| `severe` | more than 2× `maxAmount` | **yes** |
+
+A flag therefore means *"this bid exceeds even the highest cost our assessment considered
+plausible, by more than 20%"* — a claim the platform can defend to a contractor who disputes
+it. It also fails safe: a wider range (more genuine uncertainty) produces **fewer**
+accusations, not more.
+
+Scoring lives in [`anomaly.service.js`](server/src/services/anomaly.service.js) as a pure
+function with no I/O, and the margin is set by `ANOMALY_MARGIN_PERCENT` (default 20).
+
+---
+
+## Fixture mode (running without API quota)
+
+The Gemini free tier allows **20 requests per day per model**, which a single test run can
+exhaust. Both external integrations therefore have a deterministic fixture mode:
+
+| Variable | Effect |
+| --- | --- |
+| `MOCK_EXTERNAL=true` | mock both Gemini and Cloudinary |
+| `MOCK_AI=true` | mock Gemini only |
+| `MOCK_UPLOADS=true` | mock Cloudinary only |
+
+**`NODE_ENV=test` forces both on**, so `npm test` never spends quota and needs no
+credentials — the suite runs on a fresh clone with no `.env` at all.
+
+Fixture responses are keyed by the **SHA-256 of the image bytes**
+([`__fixtures__/aiResponses.js`](server/src/services/__fixtures__/aiResponses.js)), so a test
+picks its outcome by choosing which image in [`server/test/fixtures/`](server/test/fixtures/)
+it uploads — no magic request fields. Unknown images fall back to a standard "relevant"
+response. Mocked uploads return a stable fake Cloudinary URL derived from the same hash.
+
+Only final phase verification hits the real APIs.
 
 _Project, bid and milestone endpoints are documented as their phases land._
 

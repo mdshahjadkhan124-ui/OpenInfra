@@ -46,10 +46,29 @@ const relevanceSchema = new mongoose.Schema(
   { _id: false }
 );
 
-/** Sub-document: the AI's fair-cost benchmark. Absent on rejected reports. */
+/**
+ * Sub-document: the AI's fair-cost benchmark. Absent on rejected reports.
+ *
+ * Stored as a RANGE rather than a point value. A photograph carries no
+ * measuring reference, so the model cannot pin the damage's physical size —
+ * measured over six identical runs, a single point estimate varied by ~60%
+ * (CV), entirely because the assumed dimensions moved. Recording min/expected/
+ * max keeps that uncertainty visible instead of hiding it behind one number,
+ * and gives Phase 5 an upper bound it can defensibly score bids against.
+ *
+ * `amount` remains the EXPECTED value, so every existing reader keeps working.
+ */
 const costEstimateSchema = new mongoose.Schema(
   {
+    /** Expected (most likely) cost. The headline figure shown in the UI. */
     amount: { type: Number, required: true, min: 0 },
+    /** Smallest plausible cost consistent with the photo. */
+    minAmount: { type: Number, required: true, min: 0 },
+    /**
+     * Largest plausible cost consistent with the photo.
+     * Phase 5 flags a bid that exceeds this by more than ANOMALY_MARGIN_PERCENT.
+     */
+    maxAmount: { type: Number, required: true, min: 0 },
     currency: { type: String, required: true },
     severity: { type: String, enum: SEVERITY_VALUES, default: 'medium' },
     observedIssue: { type: String, default: '' },

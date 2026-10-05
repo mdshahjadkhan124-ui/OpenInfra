@@ -5,6 +5,7 @@
  * they are forwarded straight to Cloudinary, and nothing should ever persist a
  * user-supplied file on the API server's filesystem.
  */
+import crypto from 'node:crypto';
 import streamifier from 'node:stream';
 import { getCloudinary } from '../config/cloudinary.js';
 import { config } from '../config/env.js';
@@ -29,6 +30,23 @@ const assertConfigured = () => {
  * @returns {Promise<{url: string, publicId: string, width: number, height: number, bytes: number, format: string}>}
  */
 export const uploadImage = async (buffer, { folder, context } = {}) => {
+  // Fixture mode: derive a stable fake asset from the bytes. No network call,
+  // so the test suite neither needs credentials nor leaves assets behind.
+  if (config.cloudinary.mock) {
+    const hash = crypto.createHash('sha256').update(buffer).digest('hex').slice(0, 20);
+    const publicId = [config.cloudinary.folder, folder, hash].filter(Boolean).join('/');
+    logger.debug(`Cloudinary fixture mode: ${publicId}`);
+    return {
+      url: `https://res.cloudinary.com/fixture/image/upload/${publicId}.jpg`,
+      publicId,
+      width: 1600,
+      height: 1200,
+      bytes: buffer.length,
+      format: 'jpg',
+      mock: true,
+    };
+  }
+
   assertConfigured();
   const cloudinary = getCloudinary();
 
@@ -71,6 +89,10 @@ export const uploadImage = async (buffer, { folder, context } = {}) => {
  */
 export const deleteImage = async (publicId) => {
   if (!publicId || !config.cloudinary.ready) return false;
+  if (config.cloudinary.mock) {
+    logger.debug(`Cloudinary fixture mode: pretend-deleted ${publicId}`);
+    return true;
+  }
   try {
     await getCloudinary().uploader.destroy(publicId);
     logger.debug(`Deleted orphaned Cloudinary asset: ${publicId}`);
