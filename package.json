@@ -1,0 +1,31 @@
+{
+  "name": "openinfra",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI-powered civic infrastructure transparency platform: citizens report problems, Gemini estimates fair repair cost, and milestone funds are escrowed and released on-chain for anyone to audit.",
+  "author": "MD SHAHJAD KHAN <mdshahjadkhan124@gmail.com>",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "workspaces": [
+    "client",
+    "server",
+    "blockchain"
+  ],
+  "scripts": {
+    "dev": "npm-run-all --parallel dev:server dev:client",
+    "dev:server": "npm run dev --workspace server",
+    "dev:client": "npm run dev --workspace client",
+    "build": "npm run build --workspace client",
+    "test": "npm-run-all test:server test:chain",
+    "test:server": "npm run test --workspace server",
+    "test:chain": "npm run test --workspace blockchain",
+    "format": "prettier --write \"**/*.{js,jsx,json,css,md,sol}\""
+  },
+  "devDependencies": {
+    "npm-run-all": "^4.1.5",
+    "prettier": "^3.3.3"
+  }
+}
