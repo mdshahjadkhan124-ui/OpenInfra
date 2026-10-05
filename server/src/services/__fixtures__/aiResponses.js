@@ -91,3 +91,64 @@ export const FIXTURE_RESPONSES = Object.freeze({
   relevantStreetLighting,
   irrelevant,
 });
+
+// ---------------------------------------------------------------------------
+// Gemini integration #2 — milestone verification fixtures
+// ---------------------------------------------------------------------------
+
+const milestoneComplete = {
+  looksComplete: true,
+  confidence: 0.89,
+  assessment:
+    'The carriageway has been patched with fresh asphalt, compacted level with the surrounding surface. No loose debris remains.',
+  concerns: [],
+  matchesOriginalIssue: true,
+  workQuality: 'good',
+};
+
+const milestoneIncomplete = {
+  looksComplete: false,
+  confidence: 0.84,
+  assessment:
+    'The pothole has been partially filled but the surface is uneven and not compacted. Loose material is still visible around the edges.',
+  concerns: [
+    'Surface is not level with the surrounding carriageway.',
+    'Fill material appears uncompacted.',
+    'Edges have not been sealed.',
+  ],
+  matchesOriginalIssue: true,
+  workQuality: 'poor',
+};
+
+const milestoneWrongSite = {
+  looksComplete: false,
+  confidence: 0.76,
+  assessment:
+    'This photograph does not appear to show the same location as the original report, so the work cannot be verified against it.',
+  concerns: ['The site does not match the original report photo.'],
+  matchesOriginalIssue: false,
+  workQuality: 'unknown',
+};
+
+/**
+ * sha256(progressImageBuffer) → canned verification.
+ *
+ * Same convention as the report fixtures: a test picks its outcome by choosing
+ * which fixture image it uploads.
+ *   relevant-road-damage.png          -> complete   (work done)
+ *   relevant-street-lighting.png      -> incomplete (work half done)
+ *   irrelevant-not-infrastructure.png -> wrong site
+ */
+export const MILESTONE_FIXTURES = Object.freeze({
+  dbe4973ef899290a91c73601b375d1f4afcf1a82499e140ad3cb14f28c9b9e75: milestoneComplete,
+  ba32abc07b03db77577d64ba52ce0530e1367f78c1e127f64d8cbe085fbda3bf: milestoneIncomplete,
+  '086508437024f1328d51651b4963f0cd82c2a1621ae874b4ad5b901e49ae09bd': milestoneWrongSite,
+});
+
+export const DEFAULT_MILESTONE_VERIFICATION = milestoneComplete;
+
+export const MILESTONE_RESPONSES = Object.freeze({
+  milestoneComplete,
+  milestoneIncomplete,
+  milestoneWrongSite,
+});

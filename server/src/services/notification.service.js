@@ -326,8 +326,196 @@ export const projectAwardedToReporter = ({ user, project, bid }) =>
 // ---------------------------------------------------------------------------
 // Later phases — signatures land with the feature that fires them.
 //
-//   Phase 7: milestoneSubmitted, milestoneApproved (with Etherscan link),
-//            projectCompleted
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Phase 7 — milestones, verification and on-chain payment
+// ---------------------------------------------------------------------------
+
+/** The escrow for an awarded project has been funded on-chain. */
+export const escrowFunded = ({ contractor, project, transactionHash, explorerUrl }) =>
+  safeDispatch({
+    event: 'escrow.funded',
+    to: contractor.email,
+    subject: `Funds are now in escrow for ${project.title}`,
+    data: {
+      name: contractor.name,
+      projectId: project.id,
+      title: project.title,
+      transactionHash,
+      explorerUrl,
+      link: appUrl(`/contractor/projects/${project.id}`),
+    },
+  });
+
+/** A contractor's progress photo passed the AI gate and awaits a decision. */
+export const milestoneSubmitted = ({ admins, project, milestone, contractor }) =>
+  Promise.all(
+    admins.map((admin) =>
+      safeDispatch({
+        event: 'milestone.submitted',
+        to: admin.email,
+        subject: `Milestone ${milestone.number} submitted for ${project.title}`,
+        data: {
+          name: admin.name,
+          projectId: project.id,
+          title: project.title,
+          contractorName: contractor.name,
+          milestoneNumber: milestone.number,
+          milestoneDescription: milestone.description,
+          fundPercentage: milestone.fundPercentage,
+          progressImageUrl: milestone.progressImageUrl,
+          aiAssessment: milestone.aiVerificationResult?.assessment,
+          aiConfidence: milestone.aiVerificationResult?.confidence,
+          workQuality: milestone.aiVerificationResult?.workQuality,
+          link: appUrl(`/admin/milestones/${milestone.id}`),
+        },
+      })
+    )
+  );
+
+/**
+ * Gemini judged the work incomplete, so it never reached the admin's queue.
+ * The contractor is told exactly what was found wanting, and may resubmit.
+ */
+export const milestoneAiRejected = ({ contractor, project, milestone, verification }) =>
+  safeDispatch({
+    event: 'milestone.ai_rejected',
+    to: contractor.email,
+    subject: `Milestone ${milestone.number} needs another look`,
+    data: {
+      name: contractor.name,
+      projectId: project.id,
+      title: project.title,
+      milestoneNumber: milestone.number,
+      assessment: verification.assessment,
+      concerns: verification.concerns,
+      matchesOriginalIssue: verification.matchesOriginalIssue,
+      canResubmit: true,
+      link: appUrl(`/contractor/milestones/${milestone.id}`),
+    },
+  });
+
+/** An admin declined a submitted milestone. */
+export const milestoneRejected = ({ contractor, project, milestone, reason }) =>
+  safeDispatch({
+    event: 'milestone.rejected',
+    to: contractor.email,
+    subject: `Milestone ${milestone.number} was not approved`,
+    data: {
+      name: contractor.name,
+      projectId: project.id,
+      title: project.title,
+      milestoneNumber: milestone.number,
+      reason,
+      canResubmit: true,
+      link: appUrl(`/contractor/milestones/${milestone.id}`),
+    },
+  });
+
+/**
+ * A milestone was approved and paid on-chain.
+ *
+ * This is the email that makes the platform's claim checkable: the citizen who
+ * reported the problem gets the Etherscan link and can confirm the money moved
+ * without trusting anything this platform says.
+ */
+export const milestoneApproved = ({
+  contractor,
+  reporter,
+  project,
+  milestone,
+  transactionHash,
+  explorerUrl,
+}) => {
+  const payload = {
+    projectId: project.id,
+    title: project.title,
+    milestoneNumber: milestone.number,
+    milestoneDescription: milestone.description,
+    fundPercentage: milestone.fundPercentage,
+    amountWei: milestone.amountWei,
+    displayAmount: milestone.displayAmount,
+    currency: milestone.currency,
+    transactionHash,
+    explorerUrl,
+  };
+
+  const sends = [
+    safeDispatch({
+      event: 'milestone.paid.contractor',
+      to: contractor.email,
+      subject: `Payment released for milestone ${milestone.number}`,
+      data: {
+        ...payload,
+        name: contractor.name,
+        link: appUrl(`/contractor/projects/${project.id}`),
+      },
+    }),
+  ];
+
+  if (reporter?.email) {
+    sends.push(
+      safeDispatch({
+        event: 'milestone.paid.citizen',
+        to: reporter.email,
+        subject: `Progress on your report: milestone ${milestone.number} verified and paid`,
+        data: {
+          ...payload,
+          name: reporter.name,
+          // Spelled out in the template: this link is independent proof.
+          verifyYourself: explorerUrl,
+          link: appUrl(`/transparency/projects/${project.id}`),
+        },
+      })
+    );
+  }
+
+  return Promise.all(sends);
+};
+
+/** Every milestone paid; the project is finished. */
+export const projectCompleted = ({ contractor, reporter, project, explorerUrl }) => {
+  const payload = {
+    projectId: project.id,
+    title: project.title,
+    totalReleasedFunds: project.totalReleasedFunds,
+    contractExplorerUrl: explorerUrl,
+  };
+
+  const sends = [
+    safeDispatch({
+      event: 'project.completed.contractor',
+      to: contractor.email,
+      subject: `${project.title} is complete`,
+      data: {
+        ...payload,
+        name: contractor.name,
+        link: appUrl(`/contractor/projects/${project.id}`),
+      },
+    }),
+  ];
+
+  if (reporter?.email) {
+    sends.push(
+      safeDispatch({
+        event: 'project.completed.citizen',
+        to: reporter.email,
+        subject: 'The problem you reported has been fixed',
+        data: {
+          ...payload,
+          name: reporter.name,
+          link: appUrl(`/transparency/projects/${project.id}`),
+        },
+      })
+    );
+  }
+
+  return Promise.all(sends);
+};
+
+// ---------------------------------------------------------------------------
+// Aggregate export — kept last so every event above is defined.
 // ---------------------------------------------------------------------------
 
 export const notify = {
@@ -344,6 +532,12 @@ export const notify = {
   projectAwarded,
   bidNotSelected,
   projectAwardedToReporter,
+  escrowFunded,
+  milestoneSubmitted,
+  milestoneAiRejected,
+  milestoneRejected,
+  milestoneApproved,
+  projectCompleted,
 };
 
 export default notify;

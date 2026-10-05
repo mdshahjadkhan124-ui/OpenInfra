@@ -72,12 +72,13 @@ if (missingCore.length > 0) {
 const mockAll = isTest || read('MOCK_EXTERNAL', 'false') === 'true';
 const mockAi = mockAll || read('MOCK_AI', 'false') === 'true';
 const mockUploads = mockAll || read('MOCK_UPLOADS', 'false') === 'true';
+const mockChain = mockAll || read('MOCK_CHAIN', 'false') === 'true';
 
 const gemini = group(['GEMINI_API_KEY']);
 const cloudinary = group(['CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET']);
 const googleOAuth = group(['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_CALLBACK_URL']);
 const email = group(['EMAIL_USER', 'EMAIL_PASS']);
-const chain = group(['CONTRACT_ADDRESS', 'SEPOLIA_RPC_URL']);
+const chain = group(['CONTRACT_ADDRESS', 'SEPOLIA_RPC_URL', 'CHAIN_ADMIN_PRIVATE_KEY']);
 
 export const config = Object.freeze({
   env: NODE_ENV,
@@ -154,7 +155,27 @@ export const config = Object.freeze({
     ...chain,
     contractAddress: read('CONTRACT_ADDRESS'),
     rpcUrl: read('SEPOLIA_RPC_URL'),
+    /**
+     * The admin wallet that signs lockFunds and releaseMilestone.
+     *
+     * SECURITY TRADE-OFF, stated plainly: a server holding this key can move
+     * every escrowed rupee without a human present. It is here because Phase 7
+     * is a backend phase and the alternative needs a browser. Phase 9 moves
+     * signing to the admin's MetaMask, after which this variable should be
+     * removed. See services/chain.service.js for the full note.
+     */
+    adminPrivateKey: read('CHAIN_ADMIN_PRIVATE_KEY'),
+    chainId: Number.parseInt(read('CHAIN_ID', '11155111'), 10),
     etherscanBaseUrl: read('ETHERSCAN_BASE_URL', 'https://sepolia.etherscan.io'),
+    /** Confirmations to wait for before treating a release as final. */
+    confirmations: Number.parseInt(read('CHAIN_CONFIRMATIONS', '1'), 10),
+    /**
+     * Default test ETH escrowed per project when the admin does not specify.
+     * Sepolia ETH has no value, so the figure is about being able to run the
+     * flow repeatedly, not about matching the fiat award.
+     */
+    defaultEscrowEth: read('DEFAULT_ESCROW_ETH', '0.004'),
+    mock: mockChain,
   }),
 });
 
@@ -164,7 +185,7 @@ export const unconfiguredFeatures = Object.entries({
   Cloudinary: mockUploads ? { ready: true, missing: [] } : cloudinary,
   'Google OAuth': googleOAuth,
   Email: email,
-  Blockchain: chain,
+  Blockchain: mockChain ? { ready: true, missing: [] } : chain,
 })
   .filter(([, g]) => !g.ready)
   .map(([name, g]) => ({ name, missing: g.missing }));

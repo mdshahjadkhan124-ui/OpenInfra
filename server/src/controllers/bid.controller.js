@@ -2,6 +2,7 @@
  * Bid controllers.
  */
 import * as bidService from '../services/bid.service.js';
+import * as chainService from '../services/chain.service.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { sendSuccess } from '../utils/apiResponse.js';
 
@@ -58,22 +59,26 @@ export const listBidsForProject = asyncHandler(async (req, res) => {
 
 /** POST /api/admin/projects/:id/award — award the project to a bid. Admin only. */
 export const awardProject = asyncHandler(async (req, res) => {
-  const { project, bid, rejectedCount } = await bidService.awardProject(
-    req.params.id,
-    req.body.bidId,
-    req.user
-  );
+  const { project, bid, rejectedCount, milestones, escrow, escrowError } =
+    await bidService.awardProject(req.params.id, req.body.bidId, req.user, {
+      milestones: req.body.milestones,
+      escrowAmountEth: req.body.escrowAmountEth,
+    });
+
+  const flaggedNote = bid.isFlagged ? ' Note that the winning bid was flagged as anomalous.' : '';
 
   return sendSuccess(res, {
-    message: bid.isFlagged
-      ? 'Project awarded. Note that the winning bid was flagged as anomalous.'
-      : 'Project awarded.',
+    message: escrow
+      ? `Project awarded and the escrow is funded on-chain.${flaggedNote}`
+      : `Project awarded, but the escrow could not be funded — retry with POST /api/admin/projects/:id/lock-funds.${flaggedNote}`,
     data: {
       project: project.toJSON(),
       bid: bid.toJSON(),
       rejectedBids: rejectedCount,
-      // Signposts the next step, which is a wallet action rather than an API call.
-      nextStep: 'Lock the agreed funds in the escrow contract (Phase 6).',
+      milestones: milestones.map((m) => m.toJSON()),
+      escrow,
+      escrowError,
+      explorerUrl: escrow ? chainService.explorerTxUrl(escrow.transactionHash) : null,
     },
   });
 });

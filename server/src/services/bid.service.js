@@ -6,6 +6,8 @@ import { Bid, BID_STATUS } from '../models/Bid.js';
 import { Project, PROJECT_STATUS } from '../models/Project.js';
 import { User, ROLES } from '../models/User.js';
 import { scoreBid } from './anomaly.service.js';
+import { validateSchedule, createMilestonesForAward, lockProjectFunds } from './milestone.service.js';
+import { config } from '../config/env.js';
 import * as notify from './notification.service.js';
 import {
   BadRequestError,
@@ -219,7 +221,7 @@ export const withdrawBid = async (bidId, contractor) => {
  * this only records the decision and leaves the escrow fields at their
  * defaults for that step to fill.
  */
-export const awardProject = async (projectId, bidId, admin) => {
+export const awardProject = async (projectId, bidId, admin, { milestones, escrowAmountEth } = {}) => {
   const project = await Project.findById(projectId);
   if (!project) throw new NotFoundError('Project not found.');
 
@@ -247,8 +249,20 @@ export const awardProject = async (projectId, bidId, admin) => {
     throw new ConflictError('That contractor account is deactivated.');
   }
 
+  // Validate the milestone schedule BEFORE the award transaction. A schedule
+  // whose percentages do not sum to 100 would leave funds permanently
+  // unreleasable, because the escrow contract has no withdrawal function.
+  const schedule = validateSchedule(milestones);
+  const escrowEth = String(escrowAmountEth ?? config.chain.defaultEscrowEth);
+  if (!/^\d+(\.\d+)?$/.test(escrowEth) || Number(escrowEth) <= 0) {
+    throw new ValidationError('escrowAmountEth must be a positive decimal number of ETH.', {
+      details: [{ field: 'escrowAmountEth', message: `Received '${escrowEth}'.` }],
+    });
+  }
+
   const session = await mongoose.startSession();
   let losingBids = [];
+  let createdMilestones = [];
 
   try {
     await session.withTransaction(async () => {
@@ -277,9 +291,18 @@ export const awardProject = async (projectId, bidId, admin) => {
       project.awardedBid = bid._id;
       project.awardedAmount = bid.bidAmount;
       project.awardedAt = new Date();
-      // Escrow placeholders stay as they are — Phase 6 fills them when the
-      // admin's wallet actually deposits the funds on-chain.
       await project.save({ session });
+
+      // The milestone schedule is part of the award decision, so it is
+      // committed with it. Funding happens afterwards, outside this
+      // transaction, because a chain call cannot be rolled back.
+      createdMilestones = await createMilestonesForAward({
+        project,
+        bid,
+        schedule,
+        escrowAmountEth: escrowEth,
+        session,
+      });
     });
   } finally {
     await session.endSession();
@@ -300,7 +323,38 @@ export const awardProject = async (projectId, bidId, admin) => {
   const reporter = await User.findById(project.reporter).select('name email');
   if (reporter) notify.projectAwardedToReporter({ user: reporter, project, bid });
 
-  return { project, bid, rejectedCount: losingBids.length };
+  // --- Lock the escrow --------------------------------------------------
+  // Deliberately after the commit, and deliberately non-fatal. The award is a
+  // recorded decision; funding is an external action that can fail for
+  // reasons that have nothing to do with it (RPC down, wallet out of gas).
+  // A failure leaves the project 'awarded' with its schedule intact, and
+  // POST /api/admin/projects/:id/lock-funds retries it.
+  let escrow = null;
+  let escrowError = null;
+  try {
+    const locked = await lockProjectFunds(project.id, admin);
+    escrow = {
+      transactionHash: locked.chain.transactionHash,
+      contractAddress: locked.chain.contractAddress,
+      onChainProjectId: locked.chain.onChainProjectId,
+      totalLockedWei: locked.chain.totalLockedWei,
+    };
+    Object.assign(project, locked.project.toObject());
+  } catch (err) {
+    escrowError = err.message;
+    logger.error(
+      `Project ${project.id} was awarded but the escrow could not be funded: ${err.message}`
+    );
+  }
+
+  return {
+    project: await Project.findById(project._id),
+    bid,
+    rejectedCount: losingBids.length,
+    milestones: createdMilestones,
+    escrow,
+    escrowError,
+  };
 };
 
 export { POPULATE_BID };

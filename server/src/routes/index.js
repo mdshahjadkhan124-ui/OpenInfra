@@ -9,6 +9,7 @@ import reportRoutes from './report.routes.js';
 import adminRoutes from './admin.routes.js';
 import projectRoutes from './project.routes.js';
 import bidRoutes from './bid.routes.js';
+import milestoneRoutes from './milestone.routes.js';
 
 const router = Router();
 
@@ -18,7 +19,7 @@ router.use('/reports', reportRoutes);
 router.use('/admin', adminRoutes);
 router.use('/projects', projectRoutes);
 router.use('/bids', bidRoutes);
-// Phase 7: router.use('/milestones', milestoneRoutes);
+router.use('/milestones', milestoneRoutes);
 // Phase 10: router.use('/public', publicRoutes);
 
 export default router;

@@ -781,7 +781,164 @@ A bid of **13,125** is **+25% over the expected value** — a naive point-estima
 flag it — but **−18% against the upper bound**, so it is clean. That false accusation is
 exactly what scoring against the range avoids.
 
-_Milestone endpoints are documented as their phases land._
+---
+
+## Milestones, AI verification & fund release
+
+### `POST /api/admin/projects/:id/award` (extended in Phase 7)
+
+Award now carries the milestone schedule and the escrow amount:
+
+```json
+{
+  "bidId": "6ac3f778cda32cb3e1623f44",
+  "escrowAmountEth": "0.004",
+  "milestones": [
+    { "description": "Excavation, debris removal and base preparation", "fundPercentage": 30 },
+    { "description": "Base layer laid and compacted", "fundPercentage": 45 },
+    { "description": "Surface course, sealing and site reinstatement", "fundPercentage": 25 }
+  ]
+}
+```
+
+**Percentages must sum to 100%**, checked before anything is written. This is not
+cosmetic: the escrow contract has no withdrawal function, so funds not allocated to a
+milestone would be locked in it permanently. The error names the actual total.
+
+Percentages are resolved to **exact wei** off-chain, with any rounding remainder pushed
+onto the final milestone — the contract requires the shares to equal the deposit exactly.
+
+The award commits first, then the escrow is funded. A chain call cannot be rolled back
+into a database transaction, so a funding failure leaves the project `awarded` with its
+schedule intact and `escrowError` set, rather than losing the decision.
+`POST /api/admin/projects/:id/lock-funds` retries it.
+
+On success the project becomes `in_progress` with `smartContractAddress`,
+`onChainProjectId`, `fundingTxHash` and `totalLockedFunds` filled in.
+
+### `POST /api/milestones/:id/progress`
+
+**Contractor only**, own milestone. `multipart/form-data`: `image` plus an optional `note`.
+
+Gemini sees **two** images — the original report photo and the progress photo — so it can
+judge whether this is even the same site. Without that comparison a photo of any finished
+road anywhere would pass.
+
+Returns **200** either way; the outcome is in `status`:
+
+| AI verdict | Status | Effect |
+| --- | --- | --- |
+| work complete, site matches | `submitted` | enters the admin queue |
+| work incomplete | `ai_rejected` | never reaches the admin; contractor may resubmit |
+| different site | `ai_rejected` | `matchesOriginalIssue: false` |
+
+```json
+{
+  "data": { "milestone": {
+    "status": "ai_rejected",
+    "submissionCount": 2,
+    "aiVerificationResult": {
+      "looksComplete": false,
+      "confidence": 0.84,
+      "matchesOriginalIssue": true,
+      "workQuality": "poor",
+      "assessment": "The pothole has been partially filled but the surface is uneven and not compacted...",
+      "concerns": ["Surface is not level with the surrounding carriageway.", "Fill material appears uncompacted."],
+      "model": "gemini-2.5-flash"
+    }
+  } }
+}
+```
+
+The prompt is deliberately sceptical, and says so: the contractor supplying the photo is
+the party who gets paid if it passes, so a model that defaults to agreeable would make the
+gate a formality.
+
+### `POST /api/admin/milestones/:id/approve`
+
+**Admin only.** Approves the work and **releases the funds on-chain**. Synchronous — it
+waits for the transaction to be mined so the response can carry the hash.
+
+```json
+{
+  "data": {
+    "milestone": { "status": "paid", "transactionHash": "0x5ac16c...", "blockNumber": 11851541, "gasUsed": "146610" },
+    "transactionHash": "0x5ac16c...",
+    "explorerUrl": "https://sepolia.etherscan.io/tx/0x5ac16c...",
+    "projectCompleted": false,
+    "project": { "status": "in_progress", "totalReleasedFunds": "1200000000000000" }
+  }
+}
+```
+
+A keccak256 hash of the approval record — progress photo, AI verdict, approving admin,
+timestamp — is written **on-chain** with the payment, so a citizen can check that a payout
+had a documented basis.
+
+**Overriding the AI.** An AI rejection is a gate, not a verdict; the model can be wrong
+about a sound repair (bad angle, poor light, unusual surface), and without an escape hatch
+the contractor would be locked out of payment permanently. An admin may approve anyway:
+
+```json
+{ "overrideAiRejection": true, "justification": "Site inspection confirms the carriageway has been properly reinstated." }
+```
+
+The justification is required (at least 20 characters), stored on the milestone, **and
+hashed into the on-chain evidence** — so overruling the machine is a recorded act, not a
+quiet click.
+
+Statuses move `submitted` to `approving` to `paid`. The intermediate state matters: if
+the process dies mid-flight the milestone is visibly stuck rather than silently reading
+unpaid while the money has moved. A retry cannot double-pay — the contract reverts
+`MilestoneAlreadyReleased`, surfaced as **409**.
+
+### `PATCH /api/admin/milestones/:id/reject`
+
+**Admin only.** `{ "reason": "..." }` (10-500 chars, shown to the contractor, who may resubmit).
+
+### Reads
+
+| Endpoint | Who |
+| --- | --- |
+| `GET /api/admin/milestones` | admin review queue, defaults to `submitted` |
+| `GET /api/milestones/mine` | the contractor's own |
+| `GET /api/milestones/project/:projectId` | the trail for a project, with an Etherscan link per paid milestone |
+| `POST /api/admin/projects/:id/reconcile` | re-sync the database against the chain |
+| `GET /api/admin/escrow-wallet` | address and balance of the gas-paying wallet |
+
+Reconciliation exists because the chain is the authority: a release can be mined after the
+backend has given up on it, leaving a milestone stuck in `approving` while the contractor
+has in fact been paid.
+
+---
+
+## Transaction signing: the current trade-off
+
+Phase 7 signs `lockFunds` and `releaseMilestone` with a **server-side key**
+(`CHAIN_ADMIN_PRIVATE_KEY`). This is a real weakness and worth stating plainly:
+
+- Anyone who can read the server's environment — a logging mistake, a compromised
+  dependency, a leaked backup — can release **every** milestone of **every** project
+  immediately, paying for work never done. The contract's "admin can never withdraw"
+  guarantee still holds, so funds can only reach the awarded contractors, but that is
+  cold comfort.
+- Every payment becomes an act of *the platform* rather than of an identifiable official.
+  The on-chain record shows the admin wallet approved a release — which is exactly the
+  accountability this project exists to provide, and it is undermined if the signature was
+  produced by a web server reacting to an HTTP request.
+
+It is here because Phase 7 is a backend phase with no browser in the loop, and the
+milestone flow had to be demonstrable end to end before the frontend existed.
+
+**Recommendation: move signing to the admin's MetaMask in Phase 9 and delete this key.**
+The backend should prepare an unsigned transaction, the admin's wallet should sign it, and
+the backend should record the resulting hash. That makes each payout a deliberate act by a
+named official holding their own key. The seam already exists — `chain.service.js`
+exports `buildReleaseTransaction()`, which returns the identical call as unsigned
+calldata, so Phase 9 swaps the caller rather than the contract or the data model.
+
+Until then: the key is a throwaway testnet account, it never appears in a log line, and the
+double-release guard is enforced on-chain rather than in application code.
 
 ---
 
@@ -868,7 +1025,7 @@ npm run smoke             # live lock + release, prints Etherscan links
 - [x] **Phase 4** — Admin review & project publishing
 - [x] **Phase 5** — Bidding + 20% anomaly detection
 - [x] **Phase 6** — Solidity staged escrow on Sepolia
-- [ ] **Phase 7** — Milestones + AI verification + fund release
+- [x] **Phase 7** — Milestones + AI verification + fund release
 - [ ] **Phase 8** — Consolidated notification service
 - [ ] **Phase 9** — React frontend
 - [ ] **Phase 10** — Public transparency dashboard
