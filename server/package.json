@@ -1,0 +1,28 @@
+{
+  "name": "server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenInfra API — Express + MongoDB backend for the civic infrastructure transparency platform.",
+  "author": "MD SHAHJAD KHAN <mdshahjadkhan124@gmail.com>",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "test": "node --import ./test/setup.js --test \"test/**/*.test.js\""
+  },
+  "dependencies": {
+    "compression": "^1.7.4",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.4.1",
+    "helmet": "^8.0.0",
+    "mongoose": "^8.9.5",
+    "morgan": "^1.10.0"
+  }
+}

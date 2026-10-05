@@ -126,9 +126,92 @@ npm run dev                 # server on :5000, client on :5173
 
 ## API reference
 
-<!-- Documented endpoint-by-endpoint as phases land; consolidated in Phase 11. -->
+Every response uses one envelope, so the frontend never has to guess a payload shape.
 
-_Coming in later phases._
+**Success**
+```json
+{ "success": true, "message": "...", "data": { }, "meta": { } }
+```
+
+**Failure**
+```json
+{ "success": false, "message": "...", "code": "MACHINE_READABLE_CODE", "details": [ ] }
+```
+
+`details` appears on validation failures. `stack` is added for unexpected errors in
+development only — never in production.
+
+### Error codes
+
+| Status | Code | Meaning |
+| --- | --- | --- |
+| 400 | `BAD_REQUEST`, `MALFORMED_JSON`, `INVALID_ID` | Malformed or invalid input |
+| 401 | `UNAUTHORIZED`, `INVALID_TOKEN`, `TOKEN_EXPIRED` | Not authenticated |
+| 403 | `FORBIDDEN` | Authenticated, but the role may not do this |
+| 404 | `NOT_FOUND`, `ROUTE_NOT_FOUND` | No such resource or route |
+| 409 | `CONFLICT`, `DUPLICATE_KEY` | Conflicts with current state |
+| 422 | `VALIDATION_FAILED` | Well-formed but semantically invalid |
+| 429 | `RATE_LIMITED` | Too many requests |
+| 503 | `SERVICE_UNAVAILABLE` | An upstream integration is down or unconfigured |
+
+---
+
+### `GET /api/health`
+
+Liveness plus dependency check. Public, and exempt from rate limiting so uptime
+monitors don't consume a user's budget. Returns **200** when the database answers a
+ping, **503** when it does not.
+
+**Request**
+```http
+GET /api/health
+```
+
+**Response — 200**
+```json
+{
+  "success": true,
+  "message": "OpenInfra API is healthy.",
+  "data": {
+    "status": "ok",
+    "service": "openinfra-api",
+    "environment": "development",
+    "uptimeSeconds": 13,
+    "timestamp": "2026-10-05T16:33:46.506Z",
+    "database": {
+      "status": "connected",
+      "readyState": 1,
+      "name": "openinfra",
+      "host": "ac-vmfxnok-shard-00-02.zxtgt5u.mongodb.net",
+      "pingMs": 51
+    },
+    "pendingIntegrations": ["Gemini", "Cloudinary", "Google OAuth", "Email", "Blockchain"]
+  }
+}
+```
+
+`pendingIntegrations` lists feature groups whose API keys are not yet set. It is a
+development aid: the server boots without them, and only the service that needs a
+missing key fails, with a `503 SERVICE_UNAVAILABLE` naming it.
+
+**Response — 503 (database unreachable)**
+```json
+{
+  "success": false,
+  "message": "OpenInfra API is degraded.",
+  "data": { "status": "degraded", "database": { "status": "disconnected", "pingMs": null } }
+}
+```
+
+### `GET /`
+
+Service banner. Public.
+
+```json
+{ "success": true, "message": "OpenInfra API", "data": { "docs": "/api/health", "version": "0.1.0" } }
+```
+
+_Auth, report, project, bid and milestone endpoints are documented as their phases land._
 
 ---
 
@@ -143,7 +226,7 @@ _Coming in Phase 6._
 ## Build progress
 
 - [x] **Phase 0** — Monorepo setup, git identity, `.gitignore`, `.env.example` files, tooling
-- [ ] **Phase 1** — Backend foundation (Express, Mongo, error handling, health check)
+- [x] **Phase 1** — Backend foundation (Express, Mongo, error handling, health check)
 - [ ] **Phase 2** — Authentication & roles (JWT + Google OAuth + RBAC)
 - [ ] **Phase 3** — Citizen reporting + Gemini relevance gate + cost estimate
 - [ ] **Phase 4** — Admin review & project publishing
