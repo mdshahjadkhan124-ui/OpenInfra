@@ -787,9 +787,75 @@ _Milestone endpoints are documented as their phases land._
 
 ## Smart contract
 
-<!-- Contract address, ABI notes, and design rationale land in Phase 6. -->
+**`InfraEscrow`** — deployed and verified on Ethereum **Sepolia**.
 
-_Coming in Phase 6._
+| | |
+| --- | --- |
+| Address | [`0x0e1aDF967b3f6dCE355C8509B816F33356abeF3F`](https://sepolia.etherscan.io/address/0x0e1aDF967b3f6dCE355C8509B816F33356abeF3F) |
+| Verified source | [Etherscan](https://sepolia.etherscan.io/address/0x0e1aDF967b3f6dCE355C8509B816F33356abeF3F#code) · also [Blockscout](https://eth-sepolia.blockscout.com/address/0x0e1aDF967b3f6dCE355C8509B816F33356abeF3F#code) and [Sourcify](https://sourcify.dev/server/repo-ui/11155111/0x0e1aDF967b3f6dCE355C8509B816F33356abeF3F) |
+| Compiler | Solidity 0.8.28, optimizer on, 200 runs |
+| Toolchain | Hardhat 3.18 |
+| Tests | 57 passing |
+
+### What it guarantees
+
+| Guarantee | How |
+| --- | --- |
+| Only the admin can move money | `onlyOwner` on `createProject`, `lockFunds`, `releaseMilestone` |
+| **The admin can never withdraw** | There is no withdraw/sweep/refund function, and no `receive`/`fallback`. The only exit is `releaseMilestone`, which pays the project's own contractor |
+| A milestone can never be paid twice | Status set to `Released` *before* the transfer; a second attempt reverts `MilestoneAlreadyReleased` |
+| Funds cannot leave before they arrive | `releaseMilestone` reverts `ProjectNotFunded` on an unfunded project, even when the contract holds other projects' ether |
+| Milestone amounts always sum to the total | The total is **derived** from the milestone array, never supplied — true by construction. `lockFunds` then demands that exact amount |
+| Reentrancy is safe | Checks-effects-interactions, plus `nonReentrant` |
+
+### Functions
+
+| Function | Access | Notes |
+| --- | --- | --- |
+| `createProject(offChainId, contractor, amounts[])` | admin | Declares a project; total derived from `amounts` |
+| `lockFunds(projectId)` payable | admin | Requires **exactly** the total |
+| `createAndFundProject(...)` payable | admin | Both in one transaction |
+| `releaseMilestone(projectId, index, evidenceHash)` | admin | Pays the contractor; records the hash of the off-chain approval |
+| `getProject` · `getMilestone` · `getMilestones` · `remainingFunds` · `isMilestoneReleased` · `isProjectComplete` · `projectIdForOffChainId` · `contractBalance` · `totalEscrowed` · `totalReleased` | public view | |
+
+Events on every state change: `ProjectCreated`, `FundsLocked`, `MilestoneReleased`,
+`ProjectCompleted` — so the whole money trail is reconstructable from logs alone.
+
+### Design notes
+
+**One registry, not one contract per project.** A contract per project would cost a
+deployment every time and scatter the trail across dozens of addresses. One registry gives
+the transparency dashboard a single permanent address and makes `totalEscrowed` meaningful.
+
+**Amounts are wei, resolved off-chain.** Milestone percentages are converted to wei by the
+backend before they reach the contract. Dividing a percentage on-chain would leave dust and
+break the "milestones sum to the deposit" invariant.
+
+**`evidenceHash`** ties each payout to the off-chain record that justified it (progress
+photo, AI verdict, admin sign-off), so a citizen can check that a payment had a basis.
+
+**Known limitation, accepted deliberately.** Because the admin can never withdraw, a project
+abandoned part-way leaves its remaining funds locked in the contract forever. A production
+system would want a time-locked dispute path (an arbitrator, or a refund unlockable after
+prolonged inactivity). That is left out because any escape hatch weakens the core guarantee,
+and designing one that cannot be abused is a bigger problem than this project needs to solve.
+
+### Working with it
+
+```bash
+cd blockchain
+npm run compile
+npm test                  # 57 tests on the in-process chain
+npm run balance           # deployer address + Sepolia balance
+npm run deploy:sepolia
+npm run verify:sepolia -- <address> <adminAddress>
+npm run inspect           # live ledger and every project's milestones
+npm run smoke             # live lock + release, prints Etherscan links
+```
+
+> **Use a throwaway wallet.** `PRIVATE_KEY` in `blockchain/.env` belongs to a testnet-only
+> account. `hardhat.config.js` pins `chainId: 11155111`, so a mis-pointed RPC URL fails
+> before any transaction is sent rather than deploying somewhere expensive.
 
 ---
 
@@ -801,7 +867,7 @@ _Coming in Phase 6._
 - [x] **Phase 3** — Citizen reporting + Gemini relevance gate + cost estimate
 - [x] **Phase 4** — Admin review & project publishing
 - [x] **Phase 5** — Bidding + 20% anomaly detection
-- [ ] **Phase 6** — Solidity staged escrow on Sepolia
+- [x] **Phase 6** — Solidity staged escrow on Sepolia
 - [ ] **Phase 7** — Milestones + AI verification + fund release
 - [ ] **Phase 8** — Consolidated notification service
 - [ ] **Phase 9** — React frontend

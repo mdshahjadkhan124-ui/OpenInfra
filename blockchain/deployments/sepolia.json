@@ -1,0 +1,17 @@
+{
+  "network": "sepolia",
+  "chainId": 11155111,
+  "address": "0x0e1aDF967b3f6dCE355C8509B816F33356abeF3F",
+  "admin": "0x7D28330Ef4918b5d6Ad37b0f95a00764F8c8CC34",
+  "deployer": "0x7D28330Ef4918b5d6Ad37b0f95a00764F8c8CC34",
+  "transactionHash": "0x0a021636cc0630e33cb25d66c9202daaff40a14f3d01ab6509b518c4e9945aec",
+  "blockNumber": 11851337,
+  "gasUsed": "1702452",
+  "compiler": "0.8.28",
+  "optimizer": {
+    "enabled": true,
+    "runs": 200
+  },
+  "deployedAt": "2026-10-05T21:10:02.683Z",
+  "explorer": "https://sepolia.etherscan.io/address/0x0e1aDF967b3f6dCE355C8509B816F33356abeF3F"
+}

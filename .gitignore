@@ -32,9 +32,13 @@ blockchain/artifacts/
 blockchain/cache/
 blockchain/typechain/
 blockchain/typechain-types/
+# Hardhat 3 emits TypeChain bindings here
+blockchain/types/
 blockchain/coverage/
 blockchain/coverage.json
-blockchain/deployments/*.local.json
+blockchain/deployments/default.json
+blockchain/deployments/hardhat.json
+blockchain/deployments/localhost.json
 blockchain/ignition/deployments/
 
 # ---------------------------------------------------------------

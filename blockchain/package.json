@@ -1,0 +1,28 @@
+{
+  "name": "blockchain",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenInfra staged escrow contract — Hardhat project for Ethereum Sepolia.",
+  "author": "MD SHAHJAD KHAN <mdshahjadkhan124@gmail.com>",
+  "license": "MIT",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test mocha",
+    "clean": "hardhat clean",
+    "deploy:local": "hardhat run scripts/deploy.js",
+    "deploy:sepolia": "hardhat run scripts/deploy.js --network sepolia",
+    "verify:sepolia": "hardhat verify --network sepolia",
+    "balance": "hardhat run scripts/balance.js --network sepolia",
+    "inspect": "hardhat run scripts/inspect.js --network sepolia",
+    "smoke": "hardhat run scripts/smokeTest.js --network sepolia"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox-mocha-ethers": "^4.0.0",
+    "@openzeppelin/contracts": "^5.6.1",
+    "chai": "^5.3.3",
+    "dotenv": "^16.6.1",
+    "ethers": "^6.17.0",
+    "hardhat": "^3.18.1"
+  },
+  "type": "module"
+}
