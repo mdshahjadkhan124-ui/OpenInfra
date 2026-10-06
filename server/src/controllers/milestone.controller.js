@@ -136,6 +136,22 @@ export const rejectMilestone = asyncHandler(async (req, res) => {
  */
 export const prepareLockFunds = asyncHandler(async (req, res) => {
   const result = await milestoneService.prepareLockFunds(req.params.id);
+
+  /**
+   * The project may already have been funded on-chain without our recording
+   * it — see the note in milestone.service.prepareLockFunds. In that case the
+   * service reconciles instead of preparing, and there is no transaction for
+   * the wallet to sign. Say so clearly, so the UI refreshes rather than
+   * opening MetaMask for a deposit that would revert.
+   */
+  if (result.alreadyFunded) {
+    return sendSuccess(res, {
+      message:
+        'This project was already funded on-chain. Our records have been brought up to date — no further payment is needed.',
+      data: result,
+    });
+  }
+
   return sendSuccess(res, {
     message: 'Transaction prepared. Sign it in your wallet to lock the escrow.',
     data: result,
@@ -162,18 +178,27 @@ export const confirmLockFunds = asyncHandler(async (req, res) => {
 });
 
 /**
- * POST /api/admin/projects/:id/reconcile — re-sync against the chain.
+ * POST /api/admin/projects/:id/sync-from-chain
+ * POST /api/admin/projects/:id/reconcile   (same thing, older name)
  *
- * The chain is the authority. A release can be mined after the backend has
- * given up on it, leaving a milestone stuck reading 'approving' while the
- * contractor has actually been paid.
+ * Reads the escrow contract and makes our records match it. The chain is the
+ * authority, so this is a one-way sync: it never writes to the chain.
+ *
+ * The case it exists for: a deposit or release that was signed and mined, but
+ * whose confirmation never reached the backend because the browser closed or
+ * lost its connection. Without this the project is stuck behind a prompt that
+ * can never succeed.
  */
-export const reconcile = asyncHandler(async (req, res) => {
-  const result = await milestoneService.reconcileProject(req.params.id);
-  return sendSuccess(res, {
-    message: result.corrections.length > 0 ? 'Reconciled with the chain.' : 'Already in sync with the chain.',
-    data: result,
-  });
+export const syncFromChain = asyncHandler(async (req, res) => {
+  const result = await milestoneService.syncProjectFromChain(req.params.id);
+
+  const message = !result.synced
+    ? result.reason
+    : result.corrections.length === 0
+      ? 'Already in step with the chain. Nothing needed changing.'
+      : `Reconciled from the chain: ${result.corrections.length} correction(s) applied.`;
+
+  return sendSuccess(res, { message, data: result });
 });
 
 /**

@@ -166,7 +166,8 @@ export const adminApi = {
     unwrap(api.patch(`/admin/milestones/${milestoneId}/reject`, { reason })),
 
   escrowContract: () => unwrap(api.get('/admin/escrow-contract')),
-  reconcile: (projectId) => unwrap(api.post(`/admin/projects/${projectId}/reconcile`)),
+  /** One-way sync: read the chain, update our records. Never writes on-chain. */
+  syncFromChain: (projectId) => unwrapFull(api.post(`/admin/projects/${projectId}/sync-from-chain`)),
 };
 
 // ---------------------------------------------------------------------------

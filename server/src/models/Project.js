@@ -136,6 +136,16 @@ const projectSchema = new mongoose.Schema(
     onChainProjectId: { type: Number, default: null },
     fundingTxHash: { type: String, default: null },
     /**
+     * The hash as reported by the browser, recorded BEFORE it is verified.
+     *
+     * Verification waits for the transaction to be mined, which can take a
+     * minute or more. Writing nothing until it completes meant a browser that
+     * closed in that window destroyed the only copy of the hash, leaving a
+     * project funded on-chain but unrecorded. Storing it immediately — clearly
+     * marked unverified — means the record is always recoverable.
+     */
+    pendingFundingTxHash: { type: String, default: null },
+    /**
      * The wallet that actually signed the deposit. Recorded because the point
      * of moving signing to MetaMask is that a payment is attributable to a
      * named official's own key, not to the platform's server.

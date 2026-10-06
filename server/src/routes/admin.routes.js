@@ -50,7 +50,10 @@ router.post('/projects/:id/award', validate(awardWithMilestonesRules), bidContro
 // The server holds no key; see services/chain.service.js.
 router.post('/projects/:id/lock-funds/prepare', validate(mongoIdRules), milestoneController.prepareLockFunds);
 router.post('/projects/:id/lock-funds/confirm', validate(confirmTxRules), milestoneController.confirmLockFunds);
-router.post('/projects/:id/reconcile', validate(mongoIdRules), milestoneController.reconcile);
+// Same handler under both names: "sync-from-chain" says what it does, and
+// "reconcile" is kept so existing links and the earlier docs still work.
+router.post('/projects/:id/sync-from-chain', validate(mongoIdRules), milestoneController.syncFromChain);
+router.post('/projects/:id/reconcile', validate(mongoIdRules), milestoneController.syncFromChain);
 
 router.get('/milestones', validate(listMilestonesRules), milestoneController.listForReview);
 router.post(

@@ -167,6 +167,19 @@ export const config = Object.freeze({
     // MetaMask; the server prepares and verifies transactions but cannot send
     // one. See services/chain.service.js.
     chainId: Number.parseInt(read('CHAIN_ID', '11155111'), 10),
+    /**
+     * Block the escrow contract was deployed in. Used as the lower bound when
+     * scanning event logs to recover a lost transaction hash — the contract
+     * cannot have emitted anything earlier, and some RPC providers cap the
+     * block range of a single getLogs call.
+     */
+    deployBlock: Number.parseInt(read('CONTRACT_DEPLOY_BLOCK', '11851337'), 10),
+    /**
+     * Largest block range this RPC provider accepts for one eth_getLogs call.
+     * Alchemy's free tier allows TEN, which is why recovery targets a block by
+     * timestamp rather than sweeping a range. Raise it on a paid plan.
+     */
+    logWindow: Number.parseInt(read('RPC_LOG_WINDOW', '10'), 10),
     etherscanBaseUrl: read('ETHERSCAN_BASE_URL', 'https://sepolia.etherscan.io'),
     /** Confirmations to wait for before treating a release as final. */
     confirmations: Number.parseInt(read('CHAIN_CONFIRMATIONS', '1'), 10),

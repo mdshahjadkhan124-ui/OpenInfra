@@ -322,6 +322,169 @@ export const confirmTransaction = async ({ transactionHash, expectEvent, matchAr
   };
 };
 
+/**
+ * Locate the block containing a given timestamp, by binary search.
+ *
+ * Needed because a hosted RPC commonly restricts the block range of a single
+ * `eth_getLogs` call — Alchemy's free tier caps it at TEN blocks, so scanning
+ * from the deployment block is rejected outright. Guessing the block from an
+ * average block time is not good enough either: an off-chain timestamp can be
+ * hours away from when the transaction was actually sent.
+ *
+ * The contract records `fundedAt` and `releasedAt` itself, so the exact
+ * second is known. Binary search turns that into a block in ~14 cheap calls,
+ * and the log scan then needs a single narrow window.
+ */
+const findBlockByTimestamp = async (targetTimestamp) => {
+  const p = getProvider();
+  let low = config.chain.deployBlock;
+  let high = await p.getBlockNumber();
+
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    const block = await p.getBlock(mid);
+    if (!block) break;
+    if (block.timestamp < targetTimestamp) low = mid + 1;
+    else high = mid;
+  }
+  return low;
+};
+
+/**
+ * Scan a small set of narrow windows around a block for a matching log.
+ *
+ * Windows are kept at or below `config.chain.logWindow` so the call is
+ * accepted by a restricted provider, and the search walks outward a bounded
+ * number of times rather than unbounded.
+ */
+const scanNearBlock = async (centreBlock, filter) => {
+  const p = getProvider();
+  const window = config.chain.logWindow;
+  const maxSteps = 6;
+
+  for (let step = 0; step <= maxSteps; step += 1) {
+    const offsets = step === 0 ? [0] : [-step, step];
+    for (const direction of offsets) {
+      const from = Math.max(
+        config.chain.deployBlock,
+        centreBlock + direction * window - Math.floor(window / 2)
+      );
+      try {
+        const logs = await p.getLogs({ ...filter, fromBlock: from, toBlock: from + window - 1 });
+        if (logs.length > 0) return logs;
+      } catch (err) {
+        // A provider refusing the range is worth one warning, not a crash.
+        logger.debug(`getLogs ${from}-${from + window - 1} refused: ${err.shortMessage ?? err.message}`);
+      }
+    }
+  }
+  return [];
+};
+
+/**
+ * Find the transaction that funded a project, from the contract's event log.
+ *
+ * Needed because prepare -> sign -> confirm is interruptible: the browser can
+ * close, or lose its connection, between MetaMask broadcasting the deposit and
+ * the backend being told the hash. The money has moved and the contract knows
+ * about it, but our record of *which* transaction did it is gone.
+ */
+export const findFundingTransaction = async (onChainProjectId) => {
+  if (config.chain.mock) return null;
+
+  const escrow = getContract();
+  try {
+    const project = await escrow.getProject(onChainProjectId);
+    if (!project.funded || project.fundedAt === 0n) return null;
+
+    const centre = await findBlockByTimestamp(Number(project.fundedAt));
+    const logs = await scanNearBlock(centre, {
+      address: config.chain.contractAddress,
+      topics: [
+        ethers.id('FundsLocked(uint256,address,uint256)'),
+        ethers.zeroPadValue(ethers.toBeHex(onChainProjectId), 32),
+      ],
+    });
+
+    if (logs.length === 0) {
+      logger.warn(
+        `FundsLocked event for on-chain project ${onChainProjectId} not found near block ${centre}.`
+      );
+      return null;
+    }
+
+    const log = logs[0];
+    return {
+      transactionHash: log.transactionHash,
+      blockNumber: log.blockNumber,
+      depositor: ethers.getAddress(`0x${log.topics[2].slice(26)}`),
+      amountWei: BigInt(log.data).toString(),
+    };
+  } catch (err) {
+    logger.warn(
+      `Could not recover the funding transaction for on-chain project ${onChainProjectId}: ${err.message}`
+    );
+    return null;
+  }
+};
+
+/**
+ * Find the release transaction for each paid milestone.
+ *
+ * Same reasoning as findFundingTransaction, and the same technique: each
+ * milestone carries its own `releasedAt`, so each lookup is targeted rather
+ * than a sweep.
+ *
+ * @returns {Promise<Map<number, object>>} keyed by milestone index
+ */
+export const findMilestoneReleaseTransactions = async (onChainProjectId) => {
+  const byIndex = new Map();
+  if (config.chain.mock) return byIndex;
+
+  const escrow = getContract();
+  try {
+    const milestones = await escrow.getMilestones(onChainProjectId);
+
+    for (const [index, milestone] of milestones.entries()) {
+      if (milestone.status !== 1n || milestone.releasedAt === 0n) continue;
+
+      const centre = await findBlockByTimestamp(Number(milestone.releasedAt));
+      const logs = await scanNearBlock(centre, {
+        address: config.chain.contractAddress,
+        topics: [
+          ethers.id('MilestoneReleased(uint256,uint256,address,uint256,bytes32)'),
+          ethers.zeroPadValue(ethers.toBeHex(onChainProjectId), 32),
+          ethers.zeroPadValue(ethers.toBeHex(index), 32),
+        ],
+      });
+
+      if (logs.length === 0) continue;
+
+      const log = logs[0];
+      // amount and evidenceHash are the two unindexed arguments.
+      const [amount, evidenceHash] = getInterface().decodeEventLog(
+        'MilestoneReleased',
+        log.data,
+        log.topics
+      ).slice(3);
+
+      byIndex.set(index, {
+        transactionHash: log.transactionHash,
+        blockNumber: log.blockNumber,
+        contractor: ethers.getAddress(`0x${log.topics[3].slice(26)}`),
+        amountWei: amount?.toString() ?? null,
+        evidenceHash: evidenceHash ?? null,
+      });
+    }
+  } catch (err) {
+    logger.warn(
+      `Could not recover release transactions for on-chain project ${onChainProjectId}: ${err.message}`
+    );
+  }
+
+  return byIndex;
+};
+
 /** The on-chain project id for a platform project, after funding. */
 export const resolveOnChainProjectId = async (offChainId) => {
   if (config.chain.mock) {
@@ -463,6 +626,8 @@ const translateChainError = (err, action) => {
 export { mockReceipt };
 
 export default {
+  findFundingTransaction,
+  findMilestoneReleaseTransactions,
   buildLockFundsTransaction,
   buildReleaseTransaction,
   simulateRelease,

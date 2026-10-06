@@ -104,10 +104,27 @@ const ProjectCard = ({ project, contract, onReview, onChanged }) => {
   const [error, setError] = useState(null);
 
   const estimate = project.aiEstimatedCost;
-  const needsFunding = project.status === 'awarded' && !project.fundingTxHash;
   const locked = project.totalLockedFunds ?? '0';
   const released = project.totalReleasedFunds ?? '0';
   const pct = BigInt(locked) > 0n ? Number((BigInt(released) * 100n) / BigInt(locked)) : 0;
+
+  /**
+   * ONE derived funding state, so the card can never contradict itself.
+   *
+   * It previously read `status === 'awarded' && !fundingTxHash` from the local
+   * record alone, which meant a project funded on-chain but unrecorded showed
+   * a "lock the funds" prompt *and* an "already funded on-chain" error at the
+   * same time, with the button still live.
+   *
+   * `isFunded` now treats any of the three on-chain signals as proof, and
+   * `reconciled` records that we have just confirmed it from the contract.
+   */
+  const isFunded = Boolean(
+    project.fundingTxHash ||
+      project.onChainProjectId !== null && project.onChainProjectId !== undefined ||
+      BigInt(locked) > 0n
+  );
+  const needsFunding = !isFunded && ['awarded', 'in_progress'].includes(project.status);
 
   const isAdminWallet = contract?.mock || address?.toLowerCase() === contract?.admin?.toLowerCase();
   const canSign = Boolean(address) && onSepolia && isAdminWallet;
@@ -123,6 +140,23 @@ const ProjectCard = ({ project, contract, onReview, onChanged }) => {
     } catch (err) {
       setStep(null);
       setError(err.userMessage ?? 'Could not prepare the deposit.');
+      return;
+    }
+
+    /**
+     * The server may discover the project was already funded on-chain — a
+     * previous attempt whose confirmation never landed — and reconcile instead
+     * of preparing a transaction. There is nothing to sign, so refresh and
+     * report it as resolved rather than opening MetaMask for a deposit that
+     * would revert.
+     */
+    if (prepared.alreadyFunded) {
+      setStep(null);
+      toast.success(
+        'Already funded on-chain',
+        'A previous deposit succeeded but was not recorded. Our records are now up to date.'
+      );
+      onChanged();
       return;
     }
 
@@ -151,6 +185,29 @@ const ProjectCard = ({ project, contract, onReview, onChanged }) => {
       setError(
         `${err.userMessage ?? 'Could not confirm the deposit.'} Transaction ${hash.slice(0, 12)}… may still have succeeded — use Reconcile to re-sync from the chain.`
       );
+    } finally {
+      setStep(null);
+    }
+  };
+
+  /**
+   * One-way recovery: read the contract, update our records. Never writes
+   * on-chain, so it is always safe to press.
+   */
+  const syncFromChain = async () => {
+    setError(null);
+    setStep('syncing');
+    try {
+      const result = await adminApi.syncFromChain(project.id);
+      const count = result.data?.corrections?.length ?? 0;
+      if (count > 0) {
+        toast.success('Reconciled from the chain', result.message);
+      } else {
+        toast.info('Already in step with the chain', result.message);
+      }
+      onChanged();
+    } catch (err) {
+      setError(err.userMessage ?? 'Could not read the chain.');
     } finally {
       setStep(null);
     }
@@ -222,64 +279,81 @@ const ProjectCard = ({ project, contract, onReview, onChanged }) => {
               Review bids
             </Button>
           )}
+
+          {/* Hidden entirely once funded — not merely disabled, so there is
+              nothing to click that could not possibly work. */}
           {needsFunding && (
-            <Button size="sm" variant="success" onClick={lockFunds} loading={busy} disabled={!canSign}>
+            <Button
+              size="sm"
+              variant="success"
+              onClick={lockFunds}
+              loading={busy}
+              disabled={!canSign}
+            >
               Lock escrow funds
             </Button>
           )}
-          {project.onChainProjectId !== null && project.onChainProjectId !== undefined && (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={async () => {
-                try {
-                  const result = await adminApi.reconcile(project.id);
-                  toast.success(
-                    result.corrections.length ? 'Re-synced from the chain' : 'Already in sync',
-                    `${result.corrections.length} correction(s).`
-                  );
-                  onChanged();
-                } catch (err) {
-                  toast.error('Could not reconcile', err.userMessage);
-                }
-              }}
-            >
-              Reconcile
+
+          {/* Offered on any awarded project, not only ones with a known
+              on-chain id: the whole point is to recover a project whose id
+              was never recorded. */}
+          {project.status !== 'open' && (
+            <Button size="sm" variant="ghost" onClick={syncFromChain} loading={step === 'syncing'}>
+              Sync from chain
             </Button>
           )}
         </div>
       </div>
 
-      {needsFunding && (
-        <div className="border-t border-amber-200 bg-amber-50 px-5 py-3 dark:border-amber-900 dark:bg-amber-950/30">
-          {busy ? (
-            <p className="flex items-center gap-2 text-xs font-medium text-amber-800 dark:text-amber-300">
-              <Spinner size="xs" />
-              {step === 'preparing'
-                ? 'Preparing the deposit transaction…'
-                : step === 'signing'
-                  ? 'Approve the deposit in MetaMask…'
-                  : 'Verifying the deposit on-chain…'}
-            </p>
-          ) : (
-            <p className="text-xs text-amber-800 dark:text-amber-300">
-              {canSign
-                ? 'Awarded, but the escrow is not funded. The contractor cannot submit work until you lock the funds from your wallet.'
-                : !address
-                  ? 'Connect the admin wallet to lock the escrow funds.'
-                  : !onSepolia
-                    ? 'Switch your wallet to Sepolia to lock the escrow funds.'
-                    : `Only the escrow administrator (${shortAddress(contract?.admin, 6)}) can lock funds.`}
-            </p>
-          )}
-        </div>
-      )}
-
-      {error && (
+      {/*
+        Exactly one footer renders. An error REPLACES the funding prompt rather
+        than stacking beneath it, which is what produced the contradictory
+        "not funded" + "already funded on-chain" pair.
+      */}
+      {error ? (
         <div className="border-t border-red-200 bg-red-50 px-5 py-3 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
-          {error}
+          <p>{error}</p>
+          <button
+            type="button"
+            onClick={syncFromChain}
+            className="mt-1.5 font-semibold underline hover:no-underline"
+          >
+            Read the chain and reconcile
+          </button>
         </div>
-      )}
+      ) : busy ? (
+        <div className="border-t border-slate-200 bg-slate-50 px-5 py-3 dark:border-slate-800 dark:bg-slate-800/40">
+          <p className="flex items-center gap-2 text-xs font-medium text-slate-700 dark:text-slate-300">
+            <Spinner size="xs" />
+            {step === 'preparing'
+              ? 'Preparing the deposit transaction…'
+              : step === 'signing'
+                ? 'Approve the deposit in MetaMask…'
+                : step === 'syncing'
+                  ? 'Reading the escrow contract…'
+                  : 'Verifying the deposit on-chain…'}
+          </p>
+        </div>
+      ) : needsFunding ? (
+        <div className="border-t border-amber-200 bg-amber-50 px-5 py-3 dark:border-amber-900 dark:bg-amber-950/30">
+          <p className="text-xs text-amber-800 dark:text-amber-300">
+            {canSign
+              ? 'Awarded, but the escrow is not funded. The contractor cannot submit work until you lock the funds from your wallet.'
+              : !address
+                ? 'Connect the admin wallet to lock the escrow funds.'
+                : !onSepolia
+                  ? 'Switch your wallet to Sepolia to lock the escrow funds.'
+                  : `Only the escrow administrator (${shortAddress(contract?.admin, 6)}) can lock funds.`}
+          </p>
+        </div>
+      ) : isFunded && project.status !== 'completed' ? (
+        <div className="border-t border-brand-200 bg-brand-50 px-5 py-3 dark:border-brand-900 dark:bg-brand-950/30">
+          <p className="text-xs text-brand-800 dark:text-brand-300">
+            Escrow funded and locked on-chain. The contractor can submit progress for each stage.
+          </p>
+        </div>
+      ) : null}
+
     </Card>
   );
 };

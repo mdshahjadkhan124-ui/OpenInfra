@@ -133,6 +133,8 @@ const milestoneSchema = new mongoose.Schema(
     // --- On-chain payment -------------------------------------------------
     /** Set once the release transaction is mined. The public proof of payment. */
     transactionHash: { type: String, default: null },
+    /** Unverified hash from the browser. See Project.pendingFundingTxHash. */
+    pendingTxHash: { type: String, default: null },
     blockNumber: { type: Number, default: null },
     gasUsed: { type: String, default: null },
     paidAt: { type: Date, default: null },

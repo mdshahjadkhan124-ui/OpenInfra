@@ -183,9 +183,24 @@ const loadFundableProject = async (projectId) => {
 export const prepareLockFunds = async (projectId) => {
   const { project, milestones, contractorAddress } = await loadFundableProject(projectId);
 
-  // Cheap guard against a duplicate deposit before MetaMask even opens.
+  /**
+   * The project may already be funded on-chain even though our record says
+   * otherwise. prepare -> sign -> confirm is interruptible: the browser can
+   * be closed, or lose its connection, between MetaMask broadcasting the
+   * deposit and the backend being told the hash. The money has moved, the
+   * contract knows, and only our database is behind.
+   *
+   * Refusing with "already funded" was the wrong response — it left the
+   * project permanently stuck, showing a "lock the funds" prompt that could
+   * never succeed. Recovering is both safe and the only useful thing to do:
+   * the contract is the authority, so read it and record what it says.
+   */
   if (await chain.isAlreadyFundedOnChain(project.id)) {
-    throw new ConflictError('This project has already been funded on-chain.');
+    logger.warn(
+      `Project ${project.id} is funded on-chain but was not recorded; reconciling instead of funding again.`
+    );
+    const synced = await syncProjectFromChain(projectId);
+    return { alreadyFunded: true, reconciled: true, ...synced };
   }
 
   const amountsWei = milestones.map((m) => m.amountWei);
@@ -215,7 +230,34 @@ export const prepareLockFunds = async (projectId) => {
  * by inventing a hash.
  */
 export const confirmLockFunds = async (projectId, admin, { transactionHash } = {}) => {
+  // Idempotent: a repeat of a confirmation that already succeeded is a
+  // retry, not an error. Returning 409 here would make a flaky connection
+  // look like a failure when the money has demonstrably moved.
+  const existing = await Project.findById(projectId);
+  if (!existing) throw new NotFoundError('Project not found.');
+  if (existing.fundingTxHash) {
+    if (existing.fundingTxHash.toLowerCase() === String(transactionHash).toLowerCase()) {
+      return {
+        project: existing,
+        milestones: await Milestone.find({ project: existing._id }).sort({ number: 1 }),
+        receipt: { transactionHash: existing.fundingTxHash, alreadyRecorded: true },
+      };
+    }
+    throw new ConflictError('The escrow for this project has already been funded.');
+  }
+
   const { project, milestones } = await loadFundableProject(projectId);
+
+  /**
+   * Record the hash BEFORE verifying.
+   *
+   * Verification waits for the transaction to be mined, which can take a
+   * minute or more, and the browser is the only other place this hash exists.
+   * Writing it first means an interrupted confirmation leaves a recoverable
+   * record instead of a project that is funded on-chain and invisible here.
+   */
+  project.pendingFundingTxHash = transactionHash;
+  await project.save();
 
   const receipt = await chain.confirmTransaction({
     transactionHash,
@@ -234,6 +276,7 @@ export const confirmLockFunds = async (projectId, admin, { transactionHash } = {
   project.smartContractAddress = config.chain.contractAddress;
   project.onChainProjectId = onChainProjectId;
   project.fundingTxHash = receipt.transactionHash;
+  project.pendingFundingTxHash = null; // verified, so no longer pending
   project.totalLockedFunds = totalWei.toString();
   project.status = PROJECT_STATUS.IN_PROGRESS;
   project.fundedBy = receipt.from ?? null;
@@ -346,6 +389,13 @@ export const submitProgress = async (milestoneId, contractor, { file, note } = {
     );
   }
   if (milestone.status === MILESTONE_STATUS.PAID) {
+    // A repeat confirmation of the same payment is a retry, not an error.
+    if (
+      options.transactionHash &&
+      milestone.transactionHash?.toLowerCase() === String(options.transactionHash).toLowerCase()
+    ) {
+      return { milestone, project, alreadyPaid: true };
+    }
     throw new ConflictError('This milestone has already been paid.');
   }
   if (milestone.status === MILESTONE_STATUS.SUBMITTED) {
@@ -577,6 +627,11 @@ export const confirmMilestoneRelease = async (milestoneId, admin, { transactionH
     options
   );
 
+  // Same reasoning as confirmLockFunds: record before verifying, so an
+  // interrupted confirmation cannot lose the only copy of the hash.
+  milestone.pendingTxHash = transactionHash;
+  await milestone.save();
+
   const receipt = await chain.confirmTransaction({
     transactionHash,
     expectEvent: 'MilestoneReleased',
@@ -599,6 +654,7 @@ export const confirmMilestoneRelease = async (milestoneId, admin, { transactionH
   // with no timestamp, so this is the same value that went on-chain.
   milestone.evidenceHash = evidenceHash;
   milestone.transactionHash = receipt.transactionHash;
+  milestone.pendingTxHash = null; // verified
   milestone.blockNumber = receipt.blockNumber;
   milestone.gasUsed = receipt.gasUsed;
   milestone.paidAt = new Date();
@@ -697,38 +753,234 @@ export const rejectMilestone = async (milestoneId, admin, reason) => {
  * would leave a milestone reading APPROVING while the contractor has in fact
  * been paid.
  */
-export const reconcileProject = async (projectId) => {
-  const project = await Project.findById(projectId);
+/**
+ * Make the database match the chain.
+ *
+ * The chain is the authority. This exists because every on-chain write is a
+ * prepare -> sign -> confirm sequence with a browser in the middle, and the
+ * browser can vanish between the signature and the confirmation. When it does,
+ * the money has moved but our record has not — and the project would otherwise
+ * be stuck forever behind a prompt that can never succeed.
+ *
+ * Recovers, in order:
+ *   1. the on-chain project id, resolved from the off-chain id if missing;
+ *   2. the funding state and its transaction hash, read from the FundsLocked
+ *      event when we never recorded it;
+ *   3. every released milestone and its payment hash, from MilestoneReleased;
+ *   4. the project's running totals and completion state.
+ *
+ * Safe to run repeatedly: it only ever writes values read from the contract,
+ * and reports exactly what it changed.
+ */
+export const syncProjectFromChain = async (projectId) => {
+  const project = await Project.findById(projectId).populate(
+    'awardedContractor',
+    'name email walletAddress'
+  );
   if (!project) throw new NotFoundError('Project not found.');
-  if (project.onChainProjectId === null || project.onChainProjectId === undefined) {
-    throw new ConflictError('This project has no on-chain escrow to reconcile against.');
+
+  if (project.status === PROJECT_STATUS.OPEN) {
+    throw new ConflictError('This project has not been awarded, so there is nothing on-chain yet.');
   }
 
-  const onChain = await chain.getOnChainProject(project.onChainProjectId);
-  if (!onChain) throw new BadRequestError('Reconciliation is unavailable in fixture mode.');
+  // --- 1. Resolve the on-chain id -----------------------------------------
+  // The usual reason for a desync is that this was never written, so it
+  // cannot be a precondition for recovery.
+  let onChainProjectId = project.onChainProjectId;
+  if (onChainProjectId === null || onChainProjectId === undefined) {
+    onChainProjectId = await chain.resolveOnChainProjectId(project.id);
+    if (onChainProjectId === null) {
+      return {
+        synced: false,
+        reason:
+          'This project has not been funded on-chain yet, so there is nothing to reconcile. Lock the escrow funds to begin.',
+        corrections: [],
+      };
+    }
+  }
 
-  const milestones = await Milestone.find({ project: project._id }).sort({ number: 1 });
+  const onChain = await chain.getOnChainProject(onChainProjectId);
+  if (!onChain) {
+    throw new BadRequestError('Reconciliation is unavailable in fixture mode.');
+  }
+
+  // Refuse to adopt a project that is not ours. Writing another project's
+  // figures onto this one would corrupt the public record.
+  if (onChain.offChainId && onChain.offChainId !== project.id) {
+    throw new ConflictError(
+      `On-chain project ${onChainProjectId} belongs to "${onChain.offChainId}", not this project. Refusing to reconcile.`
+    );
+  }
+
   const corrections = [];
+  const milestones = await Milestone.find({ project: project._id }).sort({ number: 1 });
+
+  // --- 2. Funding ---------------------------------------------------------
+  if (project.onChainProjectId !== onChainProjectId) {
+    corrections.push({
+      field: 'onChainProjectId',
+      from: project.onChainProjectId,
+      to: onChainProjectId,
+      reason: 'resolved from the off-chain id',
+    });
+    project.onChainProjectId = onChainProjectId;
+  }
+
+  if (onChain.funded && !project.fundingTxHash) {
+    // Recover the hash from the contract's own event log.
+    const funding = await chain.findFundingTransaction(onChainProjectId);
+    if (funding) {
+      project.fundingTxHash = funding.transactionHash;
+      project.fundedBy = funding.depositor ?? project.fundedBy;
+      corrections.push({
+        field: 'fundingTxHash',
+        from: null,
+        to: funding.transactionHash,
+        reason: 'recovered from the FundsLocked event',
+      });
+    } else if (project.pendingFundingTxHash) {
+      // The log scan failed, but the browser did tell us the hash before it
+      // went away. The contract confirms the project IS funded, so adopting
+      // the recorded hash is sound.
+      project.fundingTxHash = project.pendingFundingTxHash;
+      corrections.push({
+        field: 'fundingTxHash',
+        from: null,
+        to: project.pendingFundingTxHash,
+        reason: 'adopted the hash recorded before verification',
+      });
+    } else {
+      corrections.push({
+        field: 'fundingTxHash',
+        from: null,
+        to: null,
+        reason:
+          'funded on-chain, but the transaction hash could not be recovered from logs and none was recorded',
+      });
+    }
+  }
+
+  if (project.smartContractAddress !== config.chain.contractAddress) {
+    project.smartContractAddress = config.chain.contractAddress;
+    corrections.push({ field: 'smartContractAddress', to: config.chain.contractAddress });
+  }
+
+  if (onChain.funded && project.totalLockedFunds !== onChain.totalWei) {
+    corrections.push({
+      field: 'totalLockedFunds',
+      from: project.totalLockedFunds,
+      to: onChain.totalWei,
+      reason: 'read from the contract',
+    });
+    project.totalLockedFunds = onChain.totalWei;
+  }
+
+  // --- 3. Milestones ------------------------------------------------------
+  const releaseTxs = await chain.findMilestoneReleaseTransactions(onChainProjectId);
 
   for (const m of milestones) {
     const chainState = onChain.milestones[m.onChainIndex];
     if (!chainState) continue;
 
     if (chainState.released && m.status !== MILESTONE_STATUS.PAID) {
+      const from = m.status;
       m.status = MILESTONE_STATUS.PAID;
       m.paidAt = chainState.releasedAt ?? new Date();
+
+      const tx = releaseTxs.get(m.onChainIndex);
+      if (tx) {
+        m.transactionHash = tx.transactionHash;
+        m.blockNumber = tx.blockNumber;
+        if (tx.evidenceHash) m.evidenceHash = tx.evidenceHash;
+      } else if (m.pendingTxHash) {
+        m.transactionHash = m.pendingTxHash;
+      }
+
       await m.save();
-      corrections.push({ milestone: m.number, from: m.status, to: 'paid', reason: 'released on-chain' });
+      corrections.push({
+        milestone: m.number,
+        from,
+        to: 'paid',
+        reason: tx
+          ? `released on-chain in ${tx.transactionHash}`
+          : 'released on-chain (transaction hash unavailable)',
+      });
+    }
+
+    // A milestone our database thinks is paid but the chain says is not is the
+    // dangerous direction, so it is surfaced loudly rather than silently
+    // "corrected" — it should not be possible and warrants a human look.
+    if (!chainState.released && m.status === MILESTONE_STATUS.PAID) {
+      logger.error(
+        `DESYNC: milestone ${m.number} of project ${project.id} is marked paid in the database but is NOT released on-chain.`
+      );
+      corrections.push({
+        milestone: m.number,
+        from: 'paid',
+        to: 'paid',
+        reason: 'WARNING: marked paid locally but not released on-chain — needs investigation',
+        requiresAttention: true,
+      });
     }
   }
 
-  project.totalReleasedFunds = onChain.releasedWei;
-  if (onChain.completed && project.status !== PROJECT_STATUS.COMPLETED) {
-    project.status = PROJECT_STATUS.COMPLETED;
-    project.completedAt = new Date();
-    corrections.push({ project: project.id, to: 'completed' });
+  // --- 4. Totals and status ----------------------------------------------
+  if (project.totalReleasedFunds !== onChain.releasedWei) {
+    corrections.push({
+      field: 'totalReleasedFunds',
+      from: project.totalReleasedFunds,
+      to: onChain.releasedWei,
+      reason: 'read from the contract',
+    });
+    project.totalReleasedFunds = onChain.releasedWei;
   }
+
+  const allPaid =
+    milestones.length > 0 && milestones.every((m) => m.status === MILESTONE_STATUS.PAID);
+
+  if (onChain.completed || allPaid) {
+    if (project.status !== PROJECT_STATUS.COMPLETED) {
+      corrections.push({ field: 'status', from: project.status, to: PROJECT_STATUS.COMPLETED });
+      project.status = PROJECT_STATUS.COMPLETED;
+      project.completedAt = project.completedAt ?? new Date();
+    }
+  } else if (onChain.funded && project.status === PROJECT_STATUS.AWARDED) {
+    // The state the desync left stranded: funded on-chain, still "awarded"
+    // locally, so the contractor could not submit work.
+    corrections.push({
+      field: 'status',
+      from: PROJECT_STATUS.AWARDED,
+      to: PROJECT_STATUS.IN_PROGRESS,
+      reason: 'escrow is funded on-chain',
+    });
+    project.status = PROJECT_STATUS.IN_PROGRESS;
+  }
+
   await project.save();
 
-  return { onChain, corrections };
+  if (corrections.length > 0) {
+    logger.success(
+      `Reconciled project ${project.id} from chain: ${corrections.length} correction(s).`
+    );
+  }
+
+  return {
+    synced: true,
+    corrections,
+    onChain: {
+      onChainProjectId,
+      offChainId: onChain.offChainId,
+      contractor: onChain.contractor,
+      funded: onChain.funded,
+      completed: onChain.completed,
+      totalWei: onChain.totalWei,
+      releasedWei: onChain.releasedWei,
+      remainingWei: onChain.remainingWei,
+      milestones: onChain.milestones,
+    },
+    project: await Project.findById(project._id),
+  };
 };
+
+/** Kept as the previous name so existing callers and routes keep working. */
+export const reconcileProject = syncProjectFromChain;
