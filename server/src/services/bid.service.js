@@ -6,7 +6,7 @@ import { Bid, BID_STATUS } from '../models/Bid.js';
 import { Project, PROJECT_STATUS } from '../models/Project.js';
 import { User, ROLES } from '../models/User.js';
 import { scoreBid } from './anomaly.service.js';
-import { validateSchedule, createMilestonesForAward, lockProjectFunds } from './milestone.service.js';
+import { validateSchedule, createMilestonesForAward } from './milestone.service.js';
 import { config } from '../config/env.js';
 import * as notify from './notification.service.js';
 import {
@@ -323,37 +323,17 @@ export const awardProject = async (projectId, bidId, admin, { milestones, escrow
   const reporter = await User.findById(project.reporter).select('name email');
   if (reporter) notify.projectAwardedToReporter({ user: reporter, project, bid });
 
-  // --- Lock the escrow --------------------------------------------------
-  // Deliberately after the commit, and deliberately non-fatal. The award is a
-  // recorded decision; funding is an external action that can fail for
-  // reasons that have nothing to do with it (RPC down, wallet out of gas).
-  // A failure leaves the project 'awarded' with its schedule intact, and
-  // POST /api/admin/projects/:id/lock-funds retries it.
-  let escrow = null;
-  let escrowError = null;
-  try {
-    const locked = await lockProjectFunds(project.id, admin);
-    escrow = {
-      transactionHash: locked.chain.transactionHash,
-      contractAddress: locked.chain.contractAddress,
-      onChainProjectId: locked.chain.onChainProjectId,
-      totalLockedWei: locked.chain.totalLockedWei,
-    };
-    Object.assign(project, locked.project.toObject());
-  } catch (err) {
-    escrowError = err.message;
-    logger.error(
-      `Project ${project.id} was awarded but the escrow could not be funded: ${err.message}`
-    );
-  }
-
+  // The escrow is NOT funded here any more. Funding needs a signature from the
+  // admin's MetaMask, which only the browser can obtain, so awarding records
+  // the decision and the UI then walks the official through
+  // POST /api/admin/projects/:id/lock-funds/prepare + /confirm.
   return {
     project: await Project.findById(project._id),
     bid,
     rejectedCount: losingBids.length,
     milestones: createdMilestones,
-    escrow,
-    escrowError,
+    // Signposts the next step, which is a wallet action rather than an API call.
+    nextStep: 'lock_funds',
   };
 };
 

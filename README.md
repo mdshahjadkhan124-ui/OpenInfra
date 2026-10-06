@@ -1027,7 +1027,7 @@ npm run smoke             # live lock + release, prints Etherscan links
 - [x] **Phase 6** — Solidity staged escrow on Sepolia
 - [x] **Phase 7** — Milestones + AI verification + fund release
 - [x] **Phase 8** — Consolidated notification service
-- [ ] **Phase 9** — React frontend
+- [x] **Phase 9** — React frontend
 - [ ] **Phase 10** — Public transparency dashboard
 - [ ] **Phase 11** — Polish, docs & tests
 
@@ -1149,6 +1149,158 @@ not accepted".
 Credentials are checked once at boot, so a bad password appears in the startup log rather
 than silently swallowing a citizen's notification hours later. A failed check is a warning,
 not a crash — the API works fine without email.
+
+---
+
+---
+
+## Frontend
+
+React 19 + Vite 8 + Tailwind 4, in `/client`.
+
+```
+src/
+  components/   ui.jsx (primitives), Toaster, WalletButton, ThemeToggle, ProtectedRoute
+  layouts/      PublicLayout, AuthLayout, DashboardLayout (role-driven sidebar)
+  pages/        auth/ citizen/ contractor/ admin/ public/
+  context/      Theme, Toast, Auth, Wallet
+  services/     api.js — one axios client, one error-message policy
+  hooks/        useFetch (loading / error / data / refetch), useAction
+  lib/          constants.js (status vocabulary + tones), format.js
+```
+
+### Design
+
+Teal/blue accent on neutral greys, with three semantic status colours used everywhere:
+**green** approved and paid, **red** flagged and rejected, **amber** awaiting a decision. One
+`STATUS_TONE` map in `lib/constants.js` drives every badge, so "approved" is the same green on a
+report, a bid and a milestone.
+
+- **Light and dark mode**, toggled and persisted to `localStorage`. An inline script in
+  `index.html` applies the class before React boots, so a dark-mode user never sees a white
+  flash. It follows the OS preference until the user makes an explicit choice.
+- Card-based, generous whitespace, rounded corners, soft shadows, subtle hover lift.
+- Inter via Google Fonts; sidebar on desktop, slide-over drawer on mobile.
+- Toasts bottom-centre on phones (thumb reach) and top-right on desktop. On-chain
+  confirmations get a longer-lived toast carrying the Etherscan link.
+- `prefers-reduced-motion` disables every animation.
+
+### The AI wait
+
+Filing a report runs a Cloudinary upload and a Gemini vision call — 5 to 15 seconds. A bare
+spinner for that long reads as broken, so both upload forms narrate the actual stages
+("Uploading your photo…", "Checking it shows public infrastructure…", "Estimating a fair
+repair cost…").
+
+An AI rejection returns **HTTP 201** — the submission succeeded, the verdict was no. It is
+presented as a considered answer with the model's own reason and advice on retaking the
+photo, never as an error the citizen caused.
+
+### Live anomaly feedback
+
+The bid dialog shows the assessed range and the flag threshold, and updates the band as the
+contractor types. Telling someone in advance that a figure will be flagged is fairer than
+flagging it silently afterwards — and the copy says plainly that **a flag is not a
+rejection**, which is what the backend actually does.
+
+Flagged bids are rendered in red with a left border, sorted first, and the frozen verdict is
+shown in full (bid, assessed upper bound, flag threshold, deviation) on both the admin screen
+and the contractor’s own bid list.
+
+---
+
+## Signing moved to MetaMask
+
+**`CHAIN_ADMIN_PRIVATE_KEY` is gone.** The server no longer holds a key and cannot send a
+transaction. Phase 7 documented why that had to change:
+
+- anyone who could read the server's environment could release every milestone of every
+  project, paying for work never done;
+- every payment was an act of *the platform* rather than of an identifiable official, which
+  is precisely the accountability this project exists to provide.
+
+### prepare -> sign -> confirm
+
+| Step | Who | What |
+| --- | --- | --- |
+| 1. prepare | server | returns **unsigned** calldata. Writes nothing to the database. |
+| 2. sign | the official's MetaMask | signs and broadcasts. The only way funds can move. |
+| 3. confirm | server | verifies the hash **against the chain**, then records the payment. |
+
+```http
+POST /api/admin/projects/:id/lock-funds/prepare     -> { transaction, milestones }
+POST /api/admin/projects/:id/lock-funds/confirm     { transactionHash }
+POST /api/admin/milestones/:id/approve/prepare      -> { transaction, evidenceHash }
+POST /api/admin/milestones/:id/approve/confirm      { transactionHash }
+GET  /api/admin/escrow-contract                     -> { admin, contractAddress, chainId }
+```
+
+**Step 3 is the part that matters for integrity.** The browser is not trusted: a client could
+post any hash it liked. So `confirm` fetches the receipt itself and refuses unless the
+transaction
+
+1. exists and was mined,
+2. succeeded (`status === 1`),
+3. was sent to **our** contract address, not a look-alike,
+4. emitted the expected event (`FundsLocked` / `MilestoneReleased`), and
+5. carries the right arguments — the specific `projectId` and `milestoneIndex` being claimed.
+
+A forged hash, an unrelated transaction, or a release of a *different* milestone is rejected
+with a 422 and nothing is recorded.
+
+### Other safeguards
+
+- **Simulated before the wallet opens.** `prepare` makes a static call first, so an
+  already-paid milestone is refused before the official approves a transaction that would
+  revert and cost them gas for nothing.
+- **Wrong-wallet detection.** `GET /api/admin/escrow-contract` returns the contract’s owner,
+  and the UI compares it with the connected account. An official on the wrong address is told
+  before they sign, not after an `OwnableUnauthorizedAccount` revert.
+- **Wrong-network refusal.** `sendPrepared` re-reads the chain id and refuses to sign off
+  Sepolia, where the contract does not exist.
+- **Stable evidence hash.** The approval record hashed on-chain deliberately excludes a
+  timestamp, so prepare and confirm derive the same hash even if the official takes a minute
+  in MetaMask.
+- **A failed confirm never claims the money did not move.** If the broadcast succeeded but
+  verification failed, the error says so and points at `Reconcile`, which re-syncs from the
+  chain.
+- **Award no longer funds.** Awarding records the decision; the escrow is locked in a separate
+  wallet-signed step, so a project sits at `awarded` with its schedule intact until an
+  official signs the deposit.
+
+### What is recorded
+
+`Project.fundedBy` and `Milestone.approvedByWallet` store the address that actually signed,
+taken from the verified receipt rather than from anything the client said. That is the point
+of the migration: the on-chain record now names a person’s own key, not a web server.
+
+---
+
+## Running the whole thing
+
+```bash
+npm install
+
+# fill in the three .env files, then:
+cd server && npm run create-admin -- --email you@example.com --password "yourpassword"
+
+npm run dev        # API on :5000, client on :5173
+```
+
+Vite proxies `/api` to port 5000, so the browser makes same-origin requests and the Google
+OAuth redirect works without CORS or cookie complications.
+
+### Developing without API quota
+
+The Gemini free tier allows 20 requests per day per model, which a single test run can
+exhaust. Every external integration has a fixture mode:
+
+```bash
+MOCK_EXTERNAL=true npm run dev --workspace server   # mock AI, uploads, chain and email
+```
+
+Or individually: `MOCK_AI`, `MOCK_UPLOADS`, `MOCK_CHAIN`, `MOCK_EMAIL`. All are forced on
+under `NODE_ENV=test`, so `npm test` needs no credentials at all.
 
 ---
 

@@ -25,6 +25,7 @@ import {
   rejectMilestoneRules,
   listMilestonesRules,
   awardWithMilestonesRules,
+  confirmTxRules,
 } from '../validators/milestone.validators.js';
 
 const router = Router();
@@ -45,13 +46,25 @@ router.get('/projects/:id/bids', validate([...mongoIdRules, ...listBidsRules]), 
 router.post('/projects/:id/award', validate(awardWithMilestonesRules), bidController.awardProject);
 
 // --- Escrow & milestones (Phase 7) --------------------------------------
-router.post('/projects/:id/lock-funds', validate(mongoIdRules), milestoneController.lockFunds);
+// Every on-chain write is prepare -> (admin's MetaMask signs) -> confirm.
+// The server holds no key; see services/chain.service.js.
+router.post('/projects/:id/lock-funds/prepare', validate(mongoIdRules), milestoneController.prepareLockFunds);
+router.post('/projects/:id/lock-funds/confirm', validate(confirmTxRules), milestoneController.confirmLockFunds);
 router.post('/projects/:id/reconcile', validate(mongoIdRules), milestoneController.reconcile);
 
 router.get('/milestones', validate(listMilestonesRules), milestoneController.listForReview);
-router.post('/milestones/:id/approve', validate(approveMilestoneRules), milestoneController.approveMilestone);
+router.post(
+  '/milestones/:id/approve/prepare',
+  validate(approveMilestoneRules),
+  milestoneController.prepareMilestoneRelease
+);
+router.post(
+  '/milestones/:id/approve/confirm',
+  validate([...approveMilestoneRules, ...confirmTxRules]),
+  milestoneController.confirmMilestoneRelease
+);
 router.patch('/milestones/:id/reject', validate(rejectMilestoneRules), milestoneController.rejectMilestone);
 
-router.get('/escrow-wallet', milestoneController.escrowWalletStatus);
+router.get('/escrow-contract', milestoneController.escrowContractStatus);
 
 export default router;

@@ -5,55 +5,45 @@
  * deals in project ids and wei strings and never touches ethers.
  *
  * ===========================================================================
- * SECURITY TRADE-OFF — THE SERVER HOLDS THE ADMIN KEY
+ * THE SERVER CANNOT SIGN. IT ONLY PREPARES AND VERIFIES.
  * ===========================================================================
  *
- * `CHAIN_ADMIN_PRIVATE_KEY` is the escrow contract's owner. This process can
- * therefore lock funds and release milestones with no human present. That is a
- * real and significant weakness, and it is worth being explicit about what it
- * costs:
+ * Phase 7 held the admin's private key here and signed transactions itself.
+ * That was a deliberate, documented stopgap and it is now gone, along with
+ * CHAIN_ADMIN_PRIVATE_KEY. The reasons it had to go:
  *
- *   • Anyone who reads the server's environment — through a logging mistake, a
- *     compromised dependency, a leaked backup, a misconfigured container — can
- *     drain every project's escrow to its contractors. The contract's
- *     "admin can never withdraw" guarantee still holds, so the money can only
- *     go to the awarded contractors; but an attacker could release every
- *     milestone of every project immediately, paying for work never done.
+ *   • Anyone who could read the server's environment could release every
+ *     milestone of every project, paying for work never done.
+ *   • Every payment was an act of *the platform* rather than of an
+ *     identifiable official. The on-chain record said "the admin wallet
+ *     approved this", which is worthless as accountability if a web server
+ *     produced the signature.
  *
- *   • Every payment becomes an action of *the platform*, not of an identifiable
- *     official. The on-chain record shows the admin wallet approved a release,
- *     which is exactly the accountability the project exists to provide — and
- *     it is undermined if the signature was produced by a web server reacting
- *     to an HTTP request.
+ * The flow is now prepare → sign → confirm:
  *
- * WHY IT IS HERE ANYWAY: Phase 7 is a backend phase with no browser in the
- * loop, and the milestone flow has to be demonstrable end to end before the
- * frontend exists. A server signer is the only way to do that.
+ *   1. The admin's browser asks the server to PREPARE a transaction. The
+ *      server returns unsigned calldata. It holds no key and cannot send it.
+ *   2. The admin's MetaMask signs and broadcasts. The signature is the act of
+ *      a named human holding their own key.
+ *   3. The browser hands the resulting hash back to CONFIRM, and the server
+ *      verifies it against the chain before recording anything.
  *
- * RECOMMENDATION: move signing to the admin's MetaMask in Phase 9 and delete
- * this key. The backend should prepare an unsigned transaction, the admin's
- * wallet should sign it, and the backend should then record the resulting
- * hash. That makes the signature a deliberate human act by a named official
- * holding their own key, which is what a transparency platform should be able
- * to claim. The functions below are already shaped for it: `releaseMilestone`
- * returns a receipt, and `buildReleaseTransaction` produces the same call as
- * unsigned calldata for a wallet to sign — so Phase 9 swaps the caller, not
- * the contract or the data model.
- *
- * Until then, the mitigations in place are: the key is a throwaway testnet
- * account, it never appears in a log line, and `releaseMilestone` refuses to
- * run twice for the same milestone (checked here and enforced on-chain).
+ * Step 3 is the part that actually matters for integrity. The browser is not
+ * trusted: a client could post any hash it liked. So `confirm` fetches the
+ * receipt itself and refuses unless the transaction succeeded, went to OUR
+ * contract address, and emitted the specific event for the specific milestone
+ * being claimed. A forged or unrelated hash cannot mark a milestone paid.
  */
 import { ethers } from 'ethers';
 import crypto from 'node:crypto';
 import { config } from '../config/env.js';
-import { ServiceUnavailableError, ApiError } from '../utils/ApiError.js';
+import { ServiceUnavailableError, ApiError, BadRequestError } from '../utils/ApiError.js';
 import { logger } from '../utils/logger.js';
 import { INFRA_ESCROW_ABI } from './__abi__/infraEscrow.js';
 
 let provider = null;
-let signer = null;
 let contract = null;
+let iface = null;
 
 const assertConfigured = () => {
   if (config.chain.mock) return;
@@ -64,17 +54,21 @@ const assertConfigured = () => {
   }
 };
 
-/** Normalise a private key that may or may not carry the 0x prefix. */
-const normaliseKey = (key) => (key.startsWith('0x') ? key : `0x${key}`);
+/** Read-only provider. There is no signer here by design. */
+const getProvider = () => {
+  assertConfigured();
+  provider ??= new ethers.JsonRpcProvider(config.chain.rpcUrl, config.chain.chainId);
+  return provider;
+};
 
 const getContract = () => {
-  assertConfigured();
-  if (!contract) {
-    provider = new ethers.JsonRpcProvider(config.chain.rpcUrl, config.chain.chainId);
-    signer = new ethers.Wallet(normaliseKey(config.chain.adminPrivateKey), provider);
-    contract = new ethers.Contract(config.chain.contractAddress, INFRA_ESCROW_ABI, signer);
-  }
+  contract ??= new ethers.Contract(config.chain.contractAddress, INFRA_ESCROW_ABI, getProvider());
   return contract;
+};
+
+export const getInterface = () => {
+  iface ??= new ethers.Interface(INFRA_ESCROW_ABI);
+  return iface;
 };
 
 export const explorerTxUrl = (hash) => (hash ? `${config.chain.etherscanBaseUrl}/tx/${hash}` : null);
@@ -82,8 +76,7 @@ export const explorerAddressUrl = (address) =>
   address ? `${config.chain.etherscanBaseUrl}/address/${address}` : null;
 
 /** keccak256 of a stable JSON record — the evidence hash stored on-chain. */
-export const hashEvidence = (record) =>
-  ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(record)));
+export const hashEvidence = (record) => ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(record)));
 
 /**
  * Split a total into exact wei shares from percentages.
@@ -107,15 +100,11 @@ export const splitByPercentage = (totalWei, percentages) => {
 };
 
 // ---------------------------------------------------------------------------
-// Mock mode
+// Fixture mode
 // ---------------------------------------------------------------------------
 
-/**
- * Deterministic fake chain, used by the test suite and by routine development
- * so neither needs a funded wallet or a live RPC endpoint. Hashes are derived
- * from the inputs, so the same action always produces the same "transaction".
- */
-const mockTx = (label, ...parts) => {
+/** Deterministic fake receipt, so tests need no wallet and no RPC endpoint. */
+const mockReceipt = (label, ...parts) => {
   const hash = `0x${crypto.createHash('sha256').update([label, ...parts].join(':')).digest('hex')}`;
   return {
     transactionHash: hash,
@@ -126,142 +115,228 @@ const mockTx = (label, ...parts) => {
 };
 
 // ---------------------------------------------------------------------------
-// Writes
+// PREPARE — unsigned transactions for the admin's wallet
 // ---------------------------------------------------------------------------
 
 /**
- * Create the project on-chain and deposit the full amount in one transaction.
+ * Unsigned calldata to create and fund a project.
  *
  * `createAndFundProject` rather than create-then-lock: two transactions can
- * leave a project declared on-chain but unfunded, which is a confusing thing
- * to show on a public dashboard and needs its own recovery path.
+ * leave a project declared on-chain but unfunded, and asking an official to
+ * approve two MetaMask prompts for one action invites them to click through
+ * the second without reading it.
  */
-export const lockFunds = async ({ offChainId, contractorAddress, amountsWei }) => {
+export const buildLockFundsTransaction = ({ offChainId, contractorAddress, amountsWei }) => {
   const total = amountsWei.reduce((a, b) => a + BigInt(b), 0n);
 
-  if (config.chain.mock) {
-    logger.debug(`Chain fixture mode: lockFunds ${offChainId} (${ethers.formatEther(total)} ETH)`);
-    return {
-      ...mockTx('lock', offChainId, String(total)),
-      contractAddress: '0x0000000000000000000000000000000000000000',
-      onChainProjectId: Number.parseInt(crypto.createHash('sha256').update(offChainId).digest('hex').slice(0, 6), 16) % 10_000,
-      totalLockedWei: total.toString(),
-    };
-  }
-
-  const escrow = getContract();
-
-  try {
-    // Fail before spending gas if the backend has somehow already funded this.
-    const [found] = await escrow.projectIdForOffChainId(offChainId);
-    if (found) {
-      throw new ApiError(409, 'This project has already been funded on-chain.', {
-        code: 'ALREADY_FUNDED_ON_CHAIN',
-      });
-    }
-
-    const balance = await provider.getBalance(signer.address);
-    if (balance < total) {
-      throw new ServiceUnavailableError(
-        `The platform's escrow wallet holds ${ethers.formatEther(balance)} ETH but ${ethers.formatEther(total)} ETH is needed. Top it up from a Sepolia faucet.`
-      );
-    }
-
-    logger.info(`Locking ${ethers.formatEther(total)} ETH for project ${offChainId}...`);
-
-    const tx = await escrow.createAndFundProject(offChainId, contractorAddress, amountsWei, {
-      value: total,
-    });
-    logger.info(`lockFunds tx submitted: ${tx.hash}`);
-
-    const receipt = await tx.wait(config.chain.confirmations);
-    const [, onChainProjectId] = await escrow.projectIdForOffChainId(offChainId);
-
-    logger.success(
-      `Funds locked for ${offChainId}: on-chain project ${onChainProjectId}, block ${receipt.blockNumber}`
-    );
-
-    return {
-      transactionHash: receipt.hash,
-      blockNumber: receipt.blockNumber,
-      gasUsed: receipt.gasUsed.toString(),
-      contractAddress: config.chain.contractAddress,
-      onChainProjectId: Number(onChainProjectId),
-      totalLockedWei: total.toString(),
-      mock: false,
-    };
-  } catch (err) {
-    throw translateChainError(err, 'lock the escrow funds');
-  }
+  return {
+    to: config.chain.contractAddress,
+    data: getInterface().encodeFunctionData('createAndFundProject', [
+      offChainId,
+      contractorAddress,
+      amountsWei,
+    ]),
+    value: `0x${total.toString(16)}`,
+    chainId: config.chain.chainId,
+    // Shown in the UI before the wallet opens, so the official knows what they
+    // are about to approve rather than reading raw hex in MetaMask.
+    summary: {
+      action: 'lockFunds',
+      contract: config.chain.contractAddress,
+      totalWei: total.toString(),
+      totalEth: ethers.formatEther(total),
+      milestoneCount: amountsWei.length,
+      contractorAddress,
+    },
+  };
 };
 
-/**
- * Release one milestone's funds to the contractor.
- *
- * The on-chain call is the authority on whether this milestone has already
- * been paid — `MilestoneAlreadyReleased` is enforced in the contract, so a
- * duplicate request cannot double-pay even if the database is inconsistent.
- */
-export const releaseMilestone = async ({ onChainProjectId, onChainIndex, evidenceHash }) => {
-  if (config.chain.mock) {
-    logger.debug(`Chain fixture mode: releaseMilestone(${onChainProjectId}, ${onChainIndex})`);
-    return mockTx('release', String(onChainProjectId), String(onChainIndex), evidenceHash ?? '');
-  }
+/** Unsigned calldata to release one milestone. */
+export const buildReleaseTransaction = ({ onChainProjectId, onChainIndex, evidenceHash, amountWei }) => ({
+  to: config.chain.contractAddress,
+  data: getInterface().encodeFunctionData('releaseMilestone', [
+    onChainProjectId,
+    onChainIndex,
+    evidenceHash ?? ethers.ZeroHash,
+  ]),
+  value: '0x0',
+  chainId: config.chain.chainId,
+  summary: {
+    action: 'releaseMilestone',
+    contract: config.chain.contractAddress,
+    onChainProjectId,
+    milestoneIndex: onChainIndex,
+    amountWei: amountWei ?? null,
+    amountEth: amountWei ? ethers.formatEther(BigInt(amountWei)) : null,
+    evidenceHash: evidenceHash ?? ethers.ZeroHash,
+  },
+});
 
-  const escrow = getContract();
+/**
+ * Simulate a call before offering it to the wallet.
+ *
+ * A static call reverts with the contract's own error for free. Without this,
+ * an already-paid milestone would open MetaMask, the official would approve,
+ * and the transaction would fail on-chain having cost them gas.
+ */
+export const simulateRelease = async ({ onChainProjectId, onChainIndex, evidenceHash, from }) => {
+  if (config.chain.mock) return { ok: true };
 
   try {
-    // Cheap pre-flight: a static call reverts with the contract's own error
-    // before any gas is spent, so a double-release returns a clean 409 rather
-    // than a failed transaction the admin has paid for.
-    await escrow.releaseMilestone.staticCall(
+    await getContract().releaseMilestone.staticCall(
       onChainProjectId,
       onChainIndex,
-      evidenceHash ?? ethers.ZeroHash
+      evidenceHash ?? ethers.ZeroHash,
+      { from }
     );
-
-    logger.info(`Releasing milestone ${onChainIndex} of on-chain project ${onChainProjectId}...`);
-
-    const tx = await escrow.releaseMilestone(
-      onChainProjectId,
-      onChainIndex,
-      evidenceHash ?? ethers.ZeroHash
-    );
-    logger.info(`releaseMilestone tx submitted: ${tx.hash}`);
-
-    const receipt = await tx.wait(config.chain.confirmations);
-    logger.success(`Milestone released in block ${receipt.blockNumber}: ${receipt.hash}`);
-
-    return {
-      transactionHash: receipt.hash,
-      blockNumber: receipt.blockNumber,
-      gasUsed: receipt.gasUsed.toString(),
-      mock: false,
-    };
+    return { ok: true };
   } catch (err) {
     throw translateChainError(err, 'release the milestone funds');
   }
 };
 
+// ---------------------------------------------------------------------------
+// CONFIRM — verify a hash the browser claims to have broadcast
+// ---------------------------------------------------------------------------
+
+const HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/;
+
 /**
- * The same call as unsigned calldata, for the admin's wallet to sign.
- *
- * Unused in Phase 7 but deliberately present: it is the seam along which
- * Phase 9 replaces the server signer with MetaMask, without touching the
- * milestone service or the data model.
+ * Wait for a receipt, tolerating the gap between MetaMask returning a hash and
+ * the RPC node having seen the transaction.
  */
-export const buildReleaseTransaction = ({ onChainProjectId, onChainIndex, evidenceHash }) => {
-  const iface = new ethers.Interface(INFRA_ESCROW_ABI);
+const waitForReceipt = async (transactionHash, { timeoutMs = 120_000 } = {}) => {
+  const p = getProvider();
+  const deadline = Date.now() + timeoutMs;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const receipt = await p.getTransactionReceipt(transactionHash).catch(() => null);
+    if (receipt) return receipt;
+    if (Date.now() > deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+  }
+};
+
+/**
+ * Verify a transaction really did what the client says it did.
+ *
+ * The browser is untrusted. Every claim is checked against the chain:
+ *   • the hash is well-formed
+ *   • a receipt exists and status is success
+ *   • it was sent to OUR contract, not some look-alike
+ *   • it emitted the expected event with the expected arguments
+ *
+ * Only then is the result returned for recording.
+ */
+export const confirmTransaction = async ({ transactionHash, expectEvent, matchArgs }) => {
+  if (!HASH_PATTERN.test(String(transactionHash ?? ''))) {
+    throw new BadRequestError('That is not a valid transaction hash.');
+  }
+
+  if (config.chain.mock) {
+    return {
+      transactionHash,
+      blockNumber: 11_900_000,
+      gasUsed: '146622',
+      event: expectEvent,
+      args: matchArgs ?? {},
+      mock: true,
+    };
+  }
+
+  const receipt = await waitForReceipt(transactionHash);
+  if (!receipt) {
+    throw new ApiError(
+      409,
+      'That transaction has not been mined yet. Wait for it to confirm and try again.',
+      { code: 'TX_NOT_MINED' }
+    );
+  }
+  if (receipt.status !== 1) {
+    throw new ApiError(422, 'That transaction failed on-chain, so nothing was recorded.', {
+      code: 'TX_REVERTED',
+    });
+  }
+
+  // A transaction to a different address proves nothing about our escrow.
+  const expectedTo = config.chain.contractAddress.toLowerCase();
+  if ((receipt.to ?? '').toLowerCase() !== expectedTo) {
+    throw new ApiError(
+      422,
+      'That transaction was not sent to this platform\'s escrow contract.',
+      { code: 'TX_WRONG_CONTRACT' }
+    );
+  }
+
+  // Decode our own events out of the logs.
+  const escrowInterface = getInterface();
+  const events = receipt.logs
+    .map((log) => {
+      try {
+        return escrowInterface.parseLog(log);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+
+  const match = events.find((e) => e.name === expectEvent);
+  if (!match) {
+    throw new ApiError(
+      422,
+      `That transaction did not emit a ${expectEvent} event, so it did not do what was claimed.`,
+      { code: 'TX_WRONG_EVENT' }
+    );
+  }
+
+  // And it must be the event for THIS milestone, not another one.
+  if (matchArgs) {
+    for (const [key, expected] of Object.entries(matchArgs)) {
+      const actual = match.args[key];
+      if (actual === undefined) continue;
+      if (String(actual).toLowerCase() !== String(expected).toLowerCase()) {
+        throw new ApiError(
+          422,
+          `That transaction's ${key} does not match what was expected (${actual} vs ${expected}).`,
+          { code: 'TX_ARG_MISMATCH' }
+        );
+      }
+    }
+  }
+
+  logger.success(
+    `Verified ${expectEvent} in ${transactionHash} (block ${receipt.blockNumber})`
+  );
+
   return {
-    to: config.chain.contractAddress,
-    data: iface.encodeFunctionData('releaseMilestone', [
-      onChainProjectId,
-      onChainIndex,
-      evidenceHash ?? ethers.ZeroHash,
-    ]),
-    value: '0x0',
-    chainId: config.chain.chainId,
+    transactionHash: receipt.hash,
+    blockNumber: receipt.blockNumber,
+    gasUsed: receipt.gasUsed.toString(),
+    from: receipt.from,
+    event: match.name,
+    args: Object.fromEntries(
+      match.fragment.inputs.map((input, i) => [input.name, String(match.args[i])])
+    ),
+    mock: false,
   };
+};
+
+/** The on-chain project id for a platform project, after funding. */
+export const resolveOnChainProjectId = async (offChainId) => {
+  if (config.chain.mock) {
+    return Number.parseInt(crypto.createHash('sha256').update(offChainId).digest('hex').slice(0, 6), 16) % 10_000;
+  }
+  const [found, id] = await getContract().projectIdForOffChainId(offChainId);
+  if (!found) return null;
+  return Number(id);
+};
+
+/** Has this project already been funded on-chain? Guards a double deposit. */
+export const isAlreadyFundedOnChain = async (offChainId) => {
+  if (config.chain.mock) return false;
+  const [found] = await getContract().projectIdForOffChainId(offChainId);
+  return found;
 };
 
 // ---------------------------------------------------------------------------
@@ -298,13 +373,25 @@ export const getOnChainProject = async (onChainProjectId) => {
   }
 };
 
-export const getEscrowWalletStatus = async () => {
+/**
+ * Who the contract will accept transactions from.
+ *
+ * The frontend compares this with the connected MetaMask account, so an
+ * official using the wrong wallet is told before they try to sign rather than
+ * after they have paid gas for a reverted transaction.
+ */
+export const getContractAdmin = async () => {
   if (config.chain.mock) {
-    return { address: '0x' + '0'.repeat(40), balanceEth: '999', mock: true };
+    return { admin: '0x' + '0'.repeat(40), contractAddress: config.chain.contractAddress, mock: true };
   }
-  getContract();
-  const balance = await provider.getBalance(signer.address);
-  return { address: signer.address, balanceEth: ethers.formatEther(balance), mock: false };
+  const admin = await getContract().owner();
+  return {
+    admin,
+    contractAddress: config.chain.contractAddress,
+    chainId: config.chain.chainId,
+    explorerUrl: explorerAddressUrl(config.chain.contractAddress),
+    mock: false,
+  };
 };
 
 // ---------------------------------------------------------------------------
@@ -322,18 +409,19 @@ const translateChainError = (err, action) => {
 
   const raw = err.shortMessage ?? err.message ?? '';
 
-  // Decode a custom error from the revert data if present.
   let decodedName = null;
   const data = err.data ?? err.info?.error?.data ?? err.error?.data;
   if (typeof data === 'string' && data.startsWith('0x') && data.length > 2) {
     try {
-      decodedName = new ethers.Interface(INFRA_ESCROW_ABI).parseError(data)?.name ?? null;
+      decodedName = getInterface().parseError(data)?.name ?? null;
     } catch {
       decodedName = null;
     }
   }
   if (!decodedName) {
-    const match = raw.match(/(MilestoneAlreadyReleased|ProjectNotFunded|ProjectDoesNotExist|DuplicateOffChainId|MilestoneIndexOutOfRange|IncorrectDepositAmount|OwnableUnauthorizedAccount|TransferFailed)/);
+    const match = raw.match(
+      /(MilestoneAlreadyReleased|ProjectNotFunded|ProjectDoesNotExist|DuplicateOffChainId|MilestoneIndexOutOfRange|IncorrectDepositAmount|OwnableUnauthorizedAccount|TransferFailed)/
+    );
     decodedName = match?.[1] ?? null;
   }
 
@@ -348,8 +436,8 @@ const translateChainError = (err, action) => {
     MilestoneIndexOutOfRange: [400, 'That milestone does not exist in the escrow contract.'],
     IncorrectDepositAmount: [400, 'The deposit did not match the milestone total exactly.'],
     OwnableUnauthorizedAccount: [
-      503,
-      "The platform's escrow wallet is not the admin of the contract. Check CONTRACT_ADDRESS and CHAIN_ADMIN_PRIVATE_KEY.",
+      403,
+      'The connected wallet is not the administrator of the escrow contract. Switch to the admin wallet.',
     ],
     TransferFailed: [502, "The payment to the contractor's wallet was rejected."],
   };
@@ -360,13 +448,6 @@ const translateChainError = (err, action) => {
     return new ApiError(status, message, { code: decodedName, cause: err });
   }
 
-  if (/insufficient funds/i.test(raw)) {
-    logger.error(`Escrow wallet out of gas while trying to ${action}`);
-    return new ServiceUnavailableError(
-      "The platform's escrow wallet has insufficient ETH for gas. Top it up from a Sepolia faucet.",
-      { cause: err }
-    );
-  }
   if (/could not detect network|ECONNREFUSED|ENOTFOUND|timeout|SERVER_ERROR/i.test(raw)) {
     logger.error(`RPC unreachable while trying to ${action}: ${raw}`);
     return new ServiceUnavailableError(
@@ -379,12 +460,17 @@ const translateChainError = (err, action) => {
   return new ServiceUnavailableError(`Could not ${action}. Please try again.`, { cause: err });
 };
 
+export { mockReceipt };
+
 export default {
-  lockFunds,
-  releaseMilestone,
+  buildLockFundsTransaction,
   buildReleaseTransaction,
+  simulateRelease,
+  confirmTransaction,
+  resolveOnChainProjectId,
+  isAlreadyFundedOnChain,
   getOnChainProject,
-  getEscrowWalletStatus,
+  getContractAdmin,
   splitByPercentage,
   hashEvidence,
   explorerTxUrl,

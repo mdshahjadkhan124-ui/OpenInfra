@@ -136,6 +136,8 @@ const milestoneSchema = new mongoose.Schema(
     blockNumber: { type: Number, default: null },
     gasUsed: { type: String, default: null },
     paidAt: { type: Date, default: null },
+    /** The wallet that signed the release. See Project.fundedBy. */
+    approvedByWallet: { type: String, default: null },
     /**
      * keccak256 of the approval record, passed to the contract so the payment
      * is tied on-chain to the evidence that justified it.

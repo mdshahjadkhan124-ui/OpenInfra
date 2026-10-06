@@ -62,18 +62,40 @@ export const listForReview = asyncHandler(async (req, res) => {
 });
 
 /**
- * POST /api/admin/milestones/:id/approve — approve and release the funds.
+ * POST /api/admin/milestones/:id/approve/prepare
  *
- * This is the endpoint that moves real money. It is synchronous: it waits for
- * the transaction to be mined so the response can carry the hash, which is
- * what the citizen's email and the public dashboard are built around.
+ * Returns an UNSIGNED transaction for the admin's MetaMask to sign. The server
+ * holds no key, so this is the furthest it can take a payment on its own.
+ * Nothing is written to the database — a prepared transaction the official
+ * never approves must leave no trace.
  */
-export const approveMilestone = asyncHandler(async (req, res) => {
-  const { milestone, project, explorerUrl, projectCompleted } = await milestoneService.approveAndRelease(
-    req.params.id,
-    req.user,
-    { overrideAiRejection: req.body?.overrideAiRejection === true, justification: req.body?.justification }
-  );
+export const prepareMilestoneRelease = asyncHandler(async (req, res) => {
+  const result = await milestoneService.prepareMilestoneRelease(req.params.id, req.user, {
+    overrideAiRejection: req.body?.overrideAiRejection === true,
+    justification: req.body?.justification,
+  });
+
+  return sendSuccess(res, {
+    message: 'Transaction prepared. Sign it in your wallet to release the funds.',
+    data: result,
+  });
+});
+
+/**
+ * POST /api/admin/milestones/:id/approve/confirm
+ *
+ * Takes the hash MetaMask produced and records the payment — but only after
+ * verifying against the chain that the transaction succeeded, went to our
+ * contract, and emitted MilestoneReleased for this exact milestone. The
+ * browser is not trusted to tell the truth about what it broadcast.
+ */
+export const confirmMilestoneRelease = asyncHandler(async (req, res) => {
+  const { milestone, project, explorerUrl, projectCompleted } =
+    await milestoneService.confirmMilestoneRelease(req.params.id, req.user, {
+      transactionHash: req.body.transactionHash,
+      overrideAiRejection: req.body?.overrideAiRejection === true,
+      justification: req.body?.justification,
+    });
 
   const overrideNote = milestone.aiRejectionOverridden
     ? ' This approval overrode the automated assessment and is recorded as such.'
@@ -108,9 +130,26 @@ export const rejectMilestone = asyncHandler(async (req, res) => {
   });
 });
 
-/** POST /api/admin/projects/:id/lock-funds — retry escrow funding. */
-export const lockFunds = asyncHandler(async (req, res) => {
-  const { project, chain: receipt } = await milestoneService.lockProjectFunds(req.params.id, req.user);
+/**
+ * POST /api/admin/projects/:id/lock-funds/prepare
+ * Unsigned deposit transaction for the admin's wallet.
+ */
+export const prepareLockFunds = asyncHandler(async (req, res) => {
+  const result = await milestoneService.prepareLockFunds(req.params.id);
+  return sendSuccess(res, {
+    message: 'Transaction prepared. Sign it in your wallet to lock the escrow.',
+    data: result,
+  });
+});
+
+/**
+ * POST /api/admin/projects/:id/lock-funds/confirm
+ * Verify the broadcast deposit against the chain, then record it.
+ */
+export const confirmLockFunds = asyncHandler(async (req, res) => {
+  const { project, receipt } = await milestoneService.confirmLockFunds(req.params.id, req.user, {
+    transactionHash: req.body.transactionHash,
+  });
 
   return sendSuccess(res, {
     message: 'Escrow funded. The contractor can now submit progress.',
@@ -137,11 +176,15 @@ export const reconcile = asyncHandler(async (req, res) => {
   });
 });
 
-/** GET /api/admin/escrow-wallet — balance of the wallet that pays gas. */
-export const escrowWalletStatus = asyncHandler(async (req, res) => {
-  const status = await chain.getEscrowWalletStatus();
-  return sendSuccess(res, {
-    message: 'Escrow wallet status.',
-    data: { ...status, explorerUrl: chain.explorerAddressUrl(status.address) },
-  });
+/**
+ * GET /api/admin/escrow-contract
+ *
+ * Who the contract will accept transactions from. The frontend compares this
+ * with the connected MetaMask account, so an official on the wrong wallet is
+ * told before they sign rather than after a reverted transaction has cost them
+ * gas.
+ */
+export const escrowContractStatus = asyncHandler(async (req, res) => {
+  const status = await chain.getContractAdmin();
+  return sendSuccess(res, { message: 'Escrow contract.', data: status });
 });

@@ -21,6 +21,22 @@ export const submitProgressRules = [
     .withMessage('Note must be at most 1000 characters.'),
 ];
 
+/**
+ * A transaction hash reported by the browser.
+ *
+ * Shape only — whether it is REAL is settled by chain.service.confirmTransaction,
+ * which fetches the receipt. Validation here just rejects obvious nonsense
+ * before an RPC round trip.
+ */
+export const confirmTxRules = [
+  body('transactionHash')
+    .trim()
+    .notEmpty()
+    .withMessage('The transaction hash from your wallet is required.')
+    .matches(/^0x[0-9a-fA-F]{64}$/)
+    .withMessage('That is not a valid Ethereum transaction hash.'),
+];
+
 export const approveMilestoneRules = [
   ...milestoneIdRules,
   body('overrideAiRejection')

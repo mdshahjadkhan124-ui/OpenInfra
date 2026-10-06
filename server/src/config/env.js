@@ -79,7 +79,7 @@ const gemini = group(['GEMINI_API_KEY']);
 const cloudinary = group(['CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET']);
 const googleOAuth = group(['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_CALLBACK_URL']);
 const email = group(['EMAIL_USER', 'EMAIL_PASS']);
-const chain = group(['CONTRACT_ADDRESS', 'SEPOLIA_RPC_URL', 'CHAIN_ADMIN_PRIVATE_KEY']);
+const chain = group(['CONTRACT_ADDRESS', 'SEPOLIA_RPC_URL']);
 
 export const config = Object.freeze({
   env: NODE_ENV,
@@ -163,16 +163,9 @@ export const config = Object.freeze({
     ...chain,
     contractAddress: read('CONTRACT_ADDRESS'),
     rpcUrl: read('SEPOLIA_RPC_URL'),
-    /**
-     * The admin wallet that signs lockFunds and releaseMilestone.
-     *
-     * SECURITY TRADE-OFF, stated plainly: a server holding this key can move
-     * every escrowed rupee without a human present. It is here because Phase 7
-     * is a backend phase and the alternative needs a browser. Phase 9 moves
-     * signing to the admin's MetaMask, after which this variable should be
-     * removed. See services/chain.service.js for the full note.
-     */
-    adminPrivateKey: read('CHAIN_ADMIN_PRIVATE_KEY'),
+    // No signing key. Phase 9 moved every signature to the admin's own
+    // MetaMask; the server prepares and verifies transactions but cannot send
+    // one. See services/chain.service.js.
     chainId: Number.parseInt(read('CHAIN_ID', '11155111'), 10),
     etherscanBaseUrl: read('ETHERSCAN_BASE_URL', 'https://sepolia.etherscan.io'),
     /** Confirmations to wait for before treating a release as final. */

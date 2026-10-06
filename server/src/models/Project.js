@@ -135,6 +135,12 @@ const projectSchema = new mongoose.Schema(
     /** On-chain project id inside the escrow contract. */
     onChainProjectId: { type: Number, default: null },
     fundingTxHash: { type: String, default: null },
+    /**
+     * The wallet that actually signed the deposit. Recorded because the point
+     * of moving signing to MetaMask is that a payment is attributable to a
+     * named official's own key, not to the platform's server.
+     */
+    fundedBy: { type: String, default: null },
 
     // --- Publication -------------------------------------------------------
     publishedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },

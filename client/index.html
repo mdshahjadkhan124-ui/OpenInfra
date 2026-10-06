@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="OpenInfra — report civic infrastructure problems and follow the public money that fixes them, verified on-chain." />
+    <meta name="theme-color" content="#0f766e" />
+    <title>OpenInfra · Civic Infrastructure Transparency</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+
+    <script>
+      // Applied before first paint so a dark-mode user never sees a white
+      // flash. Mirrors the logic in ThemeContext; duplicated deliberately
+      // because it has to run before React boots.
+      (function () {
+        try {
+          var stored = localStorage.getItem('openinfra-theme');
+          var dark = stored ? stored === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+          if (dark) document.documentElement.classList.add('dark');
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

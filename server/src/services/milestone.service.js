@@ -140,8 +140,14 @@ export const createMilestonesForAward = async ({ project, bid, schedule, escrowA
  * of gas — the project stays `awarded` with its schedule intact and this can
  * be retried, rather than losing the admin's decision.
  */
-export const lockProjectFunds = async (projectId, admin) => {
-  const project = await Project.findById(projectId).populate('awardedContractor', 'name email walletAddress');
+/**
+ * Shared preconditions for funding a project's escrow.
+ */
+const loadFundableProject = async (projectId) => {
+  const project = await Project.findById(projectId).populate(
+    'awardedContractor',
+    'name email walletAddress'
+  );
   if (!project) throw new NotFoundError('Project not found.');
 
   if (project.status === PROJECT_STATUS.OPEN) {
@@ -164,34 +170,88 @@ export const lockProjectFunds = async (projectId, admin) => {
     throw new ValidationError('The awarded contractor has no payout wallet address.');
   }
 
-  const amountsWei = milestones.map((m) => m.amountWei);
+  return { project, milestones, contractorAddress };
+};
 
-  const result = await chain.lockFunds({
+/**
+ * Step 1 of funding: hand the admin's browser an unsigned transaction.
+ *
+ * The server holds no key, so this is all it can do. Nothing is written to the
+ * database here — a prepared transaction the official never signs must leave
+ * no trace.
+ */
+export const prepareLockFunds = async (projectId) => {
+  const { project, milestones, contractorAddress } = await loadFundableProject(projectId);
+
+  // Cheap guard against a duplicate deposit before MetaMask even opens.
+  if (await chain.isAlreadyFundedOnChain(project.id)) {
+    throw new ConflictError('This project has already been funded on-chain.');
+  }
+
+  const amountsWei = milestones.map((m) => m.amountWei);
+  const transaction = chain.buildLockFundsTransaction({
     offChainId: project.id,
     contractorAddress,
     amountsWei,
   });
 
-  project.smartContractAddress = result.contractAddress;
-  project.onChainProjectId = result.onChainProjectId;
-  project.fundingTxHash = result.transactionHash;
-  project.totalLockedFunds = result.totalLockedWei;
+  return {
+    transaction,
+    project: { id: project.id, title: project.title },
+    milestones: milestones.map((m) => ({
+      number: m.number,
+      description: m.description,
+      fundPercentage: m.fundPercentage,
+      amountWei: m.amountWei,
+    })),
+  };
+};
+
+/**
+ * Step 2 of funding: verify the hash the browser reports, then record it.
+ *
+ * The hash is checked against the chain — success, our contract, a FundsLocked
+ * event — before anything is persisted. A client cannot mark a project funded
+ * by inventing a hash.
+ */
+export const confirmLockFunds = async (projectId, admin, { transactionHash } = {}) => {
+  const { project, milestones } = await loadFundableProject(projectId);
+
+  const receipt = await chain.confirmTransaction({
+    transactionHash,
+    expectEvent: 'FundsLocked',
+  });
+
+  const onChainProjectId = await chain.resolveOnChainProjectId(project.id);
+  if (onChainProjectId === null) {
+    throw new ConflictError(
+      'That transaction confirmed, but the escrow contract has no project for this id.'
+    );
+  }
+
+  const totalWei = milestones.reduce((sum, m) => sum + BigInt(m.amountWei), 0n);
+
+  project.smartContractAddress = config.chain.contractAddress;
+  project.onChainProjectId = onChainProjectId;
+  project.fundingTxHash = receipt.transactionHash;
+  project.totalLockedFunds = totalWei.toString();
   project.status = PROJECT_STATUS.IN_PROGRESS;
+  project.fundedBy = receipt.from ?? null;
   await project.save();
 
   logger.success(
-    `Escrow funded for project ${project.id}: ${ethers.formatEther(result.totalLockedWei)} ETH, tx ${result.transactionHash}`
+    `Escrow funded for project ${project.id} by ${receipt.from ?? 'admin wallet'}: ` +
+      `${ethers.formatEther(totalWei)} ETH, tx ${receipt.transactionHash}`
   );
 
-  // PHASE 8 transport.
   notify.escrowFunded({
     contractor: project.awardedContractor,
     project,
-    transactionHash: result.transactionHash,
-    explorerUrl: chain.explorerTxUrl(result.transactionHash),
+    transactionHash: receipt.transactionHash,
+    explorerUrl: chain.explorerTxUrl(receipt.transactionHash),
   });
 
-  return { project, milestones, chain: result };
+  return { project, milestones, receipt };
 };
 
 /** Milestones of a project, in order. */
@@ -382,16 +442,20 @@ export const submitProgress = async (milestoneId, contractor, { file, note } = {
  * unpaid while the money has actually moved — and the contract itself refuses
  * a second payment, so a retry cannot double-pay.
  */
-export const approveAndRelease = async (milestoneId, admin, { overrideAiRejection = false, justification } = {}) => {
+/**
+ * Shared preconditions and evidence hashing for approving a milestone.
+ *
+ * Returns everything both the prepare and confirm steps need, so the two
+ * cannot disagree about what is being approved.
+ */
+const prepareApproval = async (milestoneId, admin, { overrideAiRejection = false, justification } = {}) => {
   const milestone = await loadMilestone(milestoneId);
   const project = milestone.project;
 
   if (milestone.status === MILESTONE_STATUS.PAID) {
     throw new ConflictError('This milestone has already been paid.');
   }
-  if (milestone.status === MILESTONE_STATUS.APPROVING) {
-    throw new ConflictError('A payment for this milestone is already being processed.');
-  }
+
   // An AI rejection is a gate, not a verdict. The model can be wrong about a
   // perfectly good repair — a bad camera angle, poor light, an unusual
   // surface — and without a human override the contractor would be locked out
@@ -429,6 +493,7 @@ export const approveAndRelease = async (milestoneId, admin, { overrideAiRejectio
         : `Only a submitted milestone can be approved. This one is '${milestone.status}'.`
     );
   }
+
   if (project.status !== PROJECT_STATUS.IN_PROGRESS) {
     throw new ConflictError(`This project is '${project.status}' and cannot release funds.`);
   }
@@ -449,50 +514,94 @@ export const approveAndRelease = async (milestoneId, admin, { overrideAiRejectio
       model: milestone.aiVerificationResult?.model,
     },
     approvedBy: admin.id,
-    approvedAt: new Date().toISOString(),
-    // Present only when a human overruled the machine, so the on-chain hash
-    // differs and the override is provable after the fact.
+    // Deliberately NOT a timestamp: prepare and confirm must derive the same
+    // hash, and the official may take a minute to approve in MetaMask.
     ...(isOverridableAiRejection
       ? { aiRejectionOverridden: true, overrideJustification: String(justification).trim() }
       : {}),
   };
-  const evidenceHash = chain.hashEvidence(evidence);
 
-  const previousStatus = milestone.status;
-  milestone.status = MILESTONE_STATUS.APPROVING;
+  return { milestone, project, isOverridableAiRejection, evidenceHash: chain.hashEvidence(evidence) };
+};
+
+/**
+ * Step 1 of release: hand the admin's browser an unsigned transaction.
+ *
+ * Simulates the call first, so an already-paid milestone is refused here
+ * rather than after the official has approved a transaction that then reverts
+ * and costs them gas for nothing.
+ */
+export const prepareMilestoneRelease = async (milestoneId, admin, options = {}) => {
+  const { milestone, project, evidenceHash } = await prepareApproval(milestoneId, admin, options);
+
+  await chain.simulateRelease({
+    onChainProjectId: project.onChainProjectId,
+    onChainIndex: milestone.onChainIndex,
+    evidenceHash,
+  });
+
+  const transaction = chain.buildReleaseTransaction({
+    onChainProjectId: project.onChainProjectId,
+    onChainIndex: milestone.onChainIndex,
+    evidenceHash,
+    amountWei: milestone.amountWei,
+  });
+
+  return {
+    transaction,
+    evidenceHash,
+    milestone: {
+      id: milestone.id,
+      number: milestone.number,
+      description: milestone.description,
+      fundPercentage: milestone.fundPercentage,
+      amountWei: milestone.amountWei,
+      displayAmount: milestone.displayAmount,
+      currency: milestone.currency,
+    },
+    project: { id: project.id, title: project.title },
+  };
+};
+
+/**
+ * Step 2 of release: verify the broadcast transaction, then record the payment.
+ *
+ * The receipt must carry a MilestoneReleased event for THIS project and THIS
+ * milestone index. A hash from an unrelated transaction, or from a release of
+ * a different milestone, is rejected.
+ */
+export const confirmMilestoneRelease = async (milestoneId, admin, { transactionHash, ...options } = {}) => {
+  const { milestone, project, isOverridableAiRejection } = await prepareApproval(
+    milestoneId,
+    admin,
+    options
+  );
+
+  const receipt = await chain.confirmTransaction({
+    transactionHash,
+    expectEvent: 'MilestoneReleased',
+    matchArgs: {
+      projectId: String(project.onChainProjectId),
+      milestoneIndex: String(milestone.onChainIndex),
+    },
+  });
+
+  milestone.status = MILESTONE_STATUS.PAID;
   milestone.reviewedBy = admin.id;
   milestone.reviewedAt = new Date();
-  milestone.evidenceHash = evidenceHash;
+  milestone.transactionHash = receipt.transactionHash;
+  milestone.blockNumber = receipt.blockNumber;
+  milestone.gasUsed = receipt.gasUsed;
+  milestone.paidAt = new Date();
+  milestone.approvedByWallet = receipt.from ?? null;
   if (isOverridableAiRejection) {
     milestone.aiRejectionOverridden = true;
-    milestone.overrideJustification = String(justification).trim();
+    milestone.overrideJustification = String(options.justification).trim();
     logger.warn(
       `Admin ${admin.email} OVERRODE the AI rejection of milestone ${milestone.number} ` +
         `on project ${project.id}: ${milestone.overrideJustification}`
     );
   }
-  await milestone.save();
-
-  let receipt;
-  try {
-    receipt = await chain.releaseMilestone({
-      onChainProjectId: project.onChainProjectId,
-      onChainIndex: milestone.onChainIndex,
-      evidenceHash,
-    });
-  } catch (err) {
-    // Restore whatever it was before, so the admin can retry; the on-chain
-    // state is authoritative and unchanged by a failed call.
-    milestone.status = previousStatus;
-    await milestone.save();
-    throw err;
-  }
-
-  milestone.status = MILESTONE_STATUS.PAID;
-  milestone.transactionHash = receipt.transactionHash;
-  milestone.blockNumber = receipt.blockNumber;
-  milestone.gasUsed = receipt.gasUsed;
-  milestone.paidAt = new Date();
   await milestone.save();
 
   // Update the project's released total and close it out if this was the last.
@@ -512,10 +621,9 @@ export const approveAndRelease = async (milestoneId, admin, { overrideAiRejectio
 
   const explorerUrl = chain.explorerTxUrl(receipt.transactionHash);
   logger.success(
-    `Milestone ${milestone.number} of project ${project.id} PAID: ${explorerUrl ?? receipt.transactionHash}`
+    `Milestone ${milestone.number} of project ${project.id} PAID by ${receipt.from ?? 'admin wallet'}: ${explorerUrl}`
   );
 
-  // --- Notifications (PHASE 8 transport) --------------------------------
   // The citizen's email carries the Etherscan link, which is the whole point:
   // they can verify the money moved without trusting this platform.
   const reporter = await User.findById(project.reporter).select('name email');
