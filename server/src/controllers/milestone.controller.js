@@ -47,7 +47,7 @@ export const listMyMilestones = asyncHandler(async (req, res) => {
 
 /** GET /api/milestones/project/:projectId — the schedule and its progress. */
 export const listForProject = asyncHandler(async (req, res) => {
-  const result = await milestoneService.listMilestonesForProject(req.params.projectId);
+  const result = await milestoneService.listMilestonesForProject(req.params.projectId, req.user);
   return sendSuccess(res, { message: 'Milestones retrieved.', data: result });
 });
 

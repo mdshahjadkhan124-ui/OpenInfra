@@ -626,4 +626,126 @@ describe('InfraEscrow', () => {
       expect(await escrow.isProjectComplete(id)).to.equal(true);
     });
   });
+
+  // =======================================================================
+  describe('payment through a batching smart account', () => {
+    /**
+     * The scenario that broke the backend in live testing.
+     *
+     * MetaMask's smart-account batching (EIP-7702) routes the call through a
+     * delegation contract, so the transaction's `to` is that contract and not
+     * the escrow. The backend required `receipt.to` to be the escrow and so
+     * rejected a real payment: the funds had moved, the escrow had emitted
+     * MilestoneReleased, and the platform refused to record it.
+     *
+     * These pin the on-chain facts the fix relies on.
+     */
+    let smartAccount;
+    let id;
+
+    beforeEach(async () => {
+      const Factory = await ethers.getContractFactory('BatchingSmartAccount');
+      smartAccount = await Factory.deploy(await escrow.getAddress());
+      await smartAccount.waitForDeployment();
+
+      id = await createFunded();
+
+      // The delegation contract acts with the owner's authority, so it must
+      // hold ownership for the release to pass `onlyOwner` — mirroring a
+      // delegated account acting as the user.
+      await escrow.transferOwnership(await smartAccount.getAddress());
+    });
+
+    it('pays the contractor even though the escrow is not the transaction target', async () => {
+      const before = await ethers.provider.getBalance(contractor.address);
+
+      const tx = await smartAccount.releaseOne(id, 0, ethers.ZeroHash);
+      const receipt = await tx.wait();
+
+      // The receipt points at the smart account, NOT the escrow.
+      expect(receipt.to).to.equal(await smartAccount.getAddress());
+      expect(receipt.to).to.not.equal(await escrow.getAddress());
+
+      // The money still moved.
+      expect((await ethers.provider.getBalance(contractor.address)) - before).to.equal(
+        MILESTONES[0]
+      );
+    });
+
+    it('still emits MilestoneReleased from the escrow address itself', async () => {
+      // This is what makes verification-by-emitter correct: the escrow is the
+      // emitter even when it is not the recipient.
+      const tx = await smartAccount.releaseOne(id, 1, ethers.ZeroHash);
+      const receipt = await tx.wait();
+
+      const escrowAddress = await escrow.getAddress();
+      const fromEscrow = receipt.logs.filter(
+        (log) => log.address.toLowerCase() === escrowAddress.toLowerCase()
+      );
+
+      expect(fromEscrow).to.have.lengthOf(1);
+      const parsed = escrow.interface.parseLog(fromEscrow[0]);
+      expect(parsed.name).to.equal('MilestoneReleased');
+      expect(parsed.args.projectId).to.equal(id);
+      expect(parsed.args.milestoneIndex).to.equal(1n);
+      expect(parsed.args.contractor).to.equal(contractor.address);
+      expect(parsed.args.amount).to.equal(MILESTONES[1]);
+    });
+
+    it('carries the evidence hash through the intermediary unchanged', async () => {
+      // The evidence hash ties the payment to the approval record, so it must
+      // survive being relayed.
+      const evidence = ethers.keccak256(ethers.toUtf8Bytes('approval record for milestone 1'));
+
+      await expect(smartAccount.releaseOne(id, 0, evidence))
+        .to.emit(escrow, 'MilestoneReleased')
+        .withArgs(id, 0n, contractor.address, MILESTONES[0], evidence);
+    });
+
+    it('emits one escrow event per milestone when several are batched', async () => {
+      // A batch is a single transaction with several releases, so a verifier
+      // that assumes one event per transaction would mis-read it.
+      const tx = await smartAccount.releaseMany(id, [0, 1, 2], ethers.ZeroHash);
+      const receipt = await tx.wait();
+
+      const escrowAddress = await escrow.getAddress();
+      const released = receipt.logs
+        .filter((log) => log.address.toLowerCase() === escrowAddress.toLowerCase())
+        .map((log) => escrow.interface.parseLog(log))
+        .filter((e) => e.name === 'MilestoneReleased');
+
+      expect(released).to.have.lengthOf(3);
+      expect(released.map((e) => e.args.milestoneIndex)).to.deep.equal([0n, 1n, 2n]);
+
+      // And the project is settled exactly once, with nothing left over.
+      expect(await escrow.isProjectComplete(id)).to.equal(true);
+      expect(await escrow.contractBalance()).to.equal(0n);
+    });
+
+    it('cannot pay a milestone twice, even batched in one transaction', async () => {
+      // Batching must not become a way around the double-payment guard.
+      await expect(smartAccount.releaseMany(id, [0, 0], ethers.ZeroHash)).to.be.revertedWithCustomError(
+        escrow,
+        'MilestoneAlreadyReleased'
+      );
+
+      // The whole transaction reverted, so not even the first release stands.
+      const milestones = await escrow.getMilestones(id);
+      expect(milestones[0].status).to.equal(0n);
+      expect(await escrow.contractBalance()).to.equal(TOTAL);
+    });
+
+    it('does not let an unauthorised intermediary release anything', async () => {
+      // A relayer is not a licence. Ownership was moved to `smartAccount`, so a
+      // second, unowned one must still be refused.
+      const Factory = await ethers.getContractFactory('BatchingSmartAccount');
+      const rogue = await Factory.deploy(await escrow.getAddress());
+      await rogue.waitForDeployment();
+
+      await expect(rogue.releaseOne(id, 0, ethers.ZeroHash)).to.be.revertedWithCustomError(
+        escrow,
+        'OwnableUnauthorizedAccount'
+      );
+    });
+  });
 });

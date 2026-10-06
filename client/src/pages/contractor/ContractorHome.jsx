@@ -4,7 +4,16 @@ import { projectApi, bidApi } from '../../services/api.js';
 import { useFetch } from '../../hooks/useFetch.js';
 import { useAuth } from '../../context/AuthContext.jsx';
 import { WalletButton } from '../../components/WalletButton.jsx';
-import { Button, Card, Stat, LoadingState, Alert, EmptyState, StatusBadge } from '../../components/ui.jsx';
+import {
+  Button,
+  Card,
+  Stat,
+  LoadingState,
+  ErrorState,
+  Alert,
+  EmptyState,
+  StatusBadge,
+} from '../../components/ui.jsx';
 import { money, shortAddress, timeAgo } from '../../lib/format.js';
 
 export const ContractorHome = () => {
@@ -16,6 +25,14 @@ export const ContractorHome = () => {
   const allBids = bids.data?.data?.bids ?? [];
   const myProjects = awarded.data?.data?.projects ?? [];
   const loading = open.loading || bids.loading || awarded.loading;
+  // Any one of the three failing makes the totals wrong, so surface it rather
+  // than showing a confident number built from partial data.
+  const loadError = open.error ?? bids.error ?? awarded.error;
+  const reloadAll = () => {
+    open.refetch();
+    bids.refetch();
+    awarded.refetch();
+  };
 
   const counts = {
     open: open.data?.meta?.total ?? 0,
@@ -50,8 +67,11 @@ export const ContractorHome = () => {
         </Alert>
       )}
 
+      {/* An error must not fall through to zeros, which read as "nothing to bid on". */}
       {loading ? (
         <LoadingState label="Loading your activity…" />
+      ) : loadError ? (
+        <ErrorState message={loadError} onRetry={reloadAll} />
       ) : (
         <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
           <Stat label="Open to bid" value={counts.open} tone="blue" icon="🏗️" />

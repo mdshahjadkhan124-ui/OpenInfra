@@ -61,6 +61,75 @@ if (missingCore.length > 0) {
   process.exit(1);
 }
 
+/**
+ * A present-but-weak JWT secret is worse than a missing one.
+ *
+ * A missing secret stops the server with a clear message. A secret of
+ * "secret" or "changeme" starts it happily and signs every session token with
+ * something guessable — and because `authenticate` trusts the signature to
+ * identify the user, forging one means becoming any user, admin included. A
+ * fresh clone filling in the .env is exactly where that happens, so it is
+ * refused at boot rather than left to be discovered.
+ *
+ * 32 characters is the floor for the HMAC-SHA256 used to sign these tokens.
+ * `openssl rand -base64 48` produces a suitable value.
+ */
+const JWT_SECRET_MIN_LENGTH = 32;
+const WEAK_SECRETS = new Set([
+  'secret',
+  'changeme',
+  'password',
+  'jwtsecret',
+  'your-secret-key',
+  'supersecret',
+]);
+
+/**
+ * Enough distinct characters to rule out padding and repetition.
+ *
+ * Length alone is not strength. "changeme" padded to forty x's, or forty
+ * repetitions of "a", clears a length check while remaining trivial to guess.
+ * Base64 of 48 random bytes yields roughly 40 distinct characters, so a floor
+ * of 10 rejects junk without troubling anything genuinely random.
+ */
+const JWT_SECRET_MIN_DISTINCT = 10;
+
+if (!isTest) {
+  const secret = read('JWT_SECRET').trim();
+  const normalised = secret.toLowerCase();
+  const distinct = new Set(secret).size;
+
+  // Order matters: the placeholder check runs FIRST. Every value in the list is
+  // shorter than the length floor, so testing length first would make the list
+  // unreachable and its clearer message never appear.
+  const problem = WEAK_SECRETS.has(normalised)
+    ? 'it is a well-known placeholder value'
+    : secret.length < JWT_SECRET_MIN_LENGTH
+      ? `it is ${secret.length} characters; at least ${JWT_SECRET_MIN_LENGTH} are required`
+      : distinct < JWT_SECRET_MIN_DISTINCT
+        ? `it uses only ${distinct} distinct characters, so it is padding or repetition ` +
+          `rather than a random secret; at least ${JWT_SECRET_MIN_DISTINCT} are required`
+        : null;
+
+  if (problem) {
+    console.error(
+      [
+        '',
+        '  ✗ Cannot start: JWT_SECRET is not strong enough.',
+        '',
+        `      ${problem}.`,
+        '',
+        '    Anyone who guesses this secret can forge a session token for any',
+        '    account, including an administrator. Generate a real one:',
+        '',
+        '      openssl rand -base64 48',
+        '',
+      ].join('\n')
+    );
+    process.exit(1);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Feature groups — optional at boot, validated at point of use
 // ---------------------------------------------------------------------------

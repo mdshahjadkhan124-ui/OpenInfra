@@ -44,7 +44,11 @@ router.post(
   milestoneController.submitProgress
 );
 
-// --- Shared (any signed-in role) -----------------------------------------
+// --- Participants only ---------------------------------------------------
+// The assigned contractor and admins. These are the FULL records, including
+// an admin's internal override justification, so the service enforces
+// participation rather than merely requiring a signed-in user. The public,
+// redacted view lives at /api/public.
 router.get(
   '/project/:projectId',
   validate(projectIdParamRules),

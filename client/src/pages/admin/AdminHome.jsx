@@ -4,7 +4,15 @@ import { adminApi } from '../../services/api.js';
 import { useFetch } from '../../hooks/useFetch.js';
 import { useAuth } from '../../context/AuthContext.jsx';
 import { WalletButton } from '../../components/WalletButton.jsx';
-import { Button, Card, Stat, LoadingState, Alert, EtherscanLink } from '../../components/ui.jsx';
+import {
+  Button,
+  Card,
+  Stat,
+  LoadingState,
+  ErrorState,
+  Alert,
+  EtherscanLink,
+} from '../../components/ui.jsx';
 import { shortAddress } from '../../lib/format.js';
 import { useWallet } from '../../context/WalletContext.jsx';
 
@@ -53,8 +61,15 @@ export const AdminHome = () => {
         </Alert>
       )}
 
+      {/*
+        An error must not fall through to the zeros below. "0 reports to
+        review" and "we could not reach the server" look identical on a
+        dashboard, and the first one tells an official there is nothing to do.
+      */}
       {stats.loading ? (
         <LoadingState label="Loading dashboard…" />
+      ) : stats.error ? (
+        <ErrorState message={stats.error} onRetry={stats.refetch} />
       ) : (
         <>
           <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">

@@ -40,6 +40,82 @@ Each folder has its own `SETUP.md` with folder-specific notes.
 
 ---
 
+## Architecture
+
+Three deployables and two external authorities. The database records *decisions*; the
+contract records *money*. Where they disagree, the contract wins — and there is an explicit
+path to make the database agree again.
+
+```
+                                ┌──────────────────────────┐
+  Citizen ─┐                    │   Google Gemini Vision   │
+           │                    │  relevance gate + cost   │
+  Contractor ─┐                 │  estimate + work check   │
+           │  │                 └────────────▲─────────────┘
+  Admin ───┐  │                              │
+         ┌─┴──┴──┴──┐    REST/JSON    ┌───────┴──────────────┐
+         │  client  │ ──────────────▶ │       server         │
+         │  React   │ ◀────────────── │   Express + Mongoose │
+         │  Vite    │                 └───┬──────────────┬───┘
+         └────┬─────┘                     │              │
+              │                   ┌───────▼──────┐  ┌────▼─────────┐
+              │                   │ MongoDB Atlas│  │  Cloudinary  │
+              │                   │  decisions   │  │    images    │
+              │                   └──────────────┘  └──────────────┘
+              │
+              │  unsigned tx ──▶ signed in MetaMask ──▶ broadcast
+              │                                             │
+              ▼                                             ▼
+      ┌───────────────┐                        ┌──────────────────────┐
+      │   MetaMask    │                        │  InfraEscrow.sol     │
+      │ admin's key   │                        │  Ethereum Sepolia    │
+      └───────────────┘                        │  holds the funds     │
+                                               └──────────┬───────────┘
+              server reads receipts & events ◀────────────┘
+                     (verification + reconciliation)
+```
+
+### Layers, and what each may not do
+
+The server is strictly layered, and the constraints are the point:
+
+```
+routes/        URL shape, middleware order, validation rules
+controllers/   HTTP only — req/res in, status codes out.  Never touches Mongoose.
+services/      all business rules and external calls.     Never touches req/res.
+models/        schema, indexes, invariants
+```
+
+A controller that reached into a model would put business rules somewhere untestable; a
+service that read `req` could not be called from a script or a test. Both are avoided
+throughout.
+
+`chain.service.js` is the **only** module that talks to Ethereum, and it holds no private
+key. Every other module asks it for an unsigned transaction.
+
+### Who holds the truth
+
+| Fact | Authority | Why |
+|---|---|---|
+| Does this repair deserve payment? | Gemini, then a human admin | the AI is a gate, not the decision |
+| How much is fair? | Gemini's frozen estimate range | snapshotted at publish so bids are judged against one number |
+| Has the money moved? | the contract | the database can only *record* what the chain did |
+| Who approved it? | the admin's wallet signature | an act by a named official, not by a server |
+
+### Trust boundaries
+
+- **The browser is not trusted** about anything on-chain. It reports a transaction hash;
+  the server fetches the receipt and re-verifies the event, its emitter and its arguments
+  before recording anything.
+- **Role claims in a JWT are not trusted.** `authenticate` re-reads the user from MongoDB on
+  every request, so a revoked admin loses access immediately rather than when their token
+  expires.
+- **The contract trusts only its owner** for releases, and has no withdraw function at all —
+  so not even a fully compromised server can route escrowed funds anywhere but the awarded
+  contractor.
+
+---
+
 ## Roles
 
 | Role | Can do |
@@ -104,26 +180,185 @@ cd server && npm run create-admin -- --email you@example.com --password "yourpas
 
 ## Setup
 
-<!-- Filled in progressively; completed in Phase 11. -->
+Follow these in order. Steps 1–4 get the app running with **no external accounts at all**
+(fixture mode); steps 5–8 connect the real services one at a time, so a failure is always
+attributable to the thing you just added.
 
 ### Prerequisites
 
-- Node.js **>= 18.18** (built on v24)
-- A MongoDB database (local `mongod`, or a free MongoDB Atlas cluster)
-- MetaMask browser extension with a **Sepolia testnet** account funded from a faucet
+- Node.js **>= 18.18** (built and tested on v24)
+- A MongoDB database — a free [Atlas](https://www.mongodb.com/cloud/atlas) cluster or a
+  local `mongod`
+- For the on-chain half: the **MetaMask** browser extension with a **Sepolia** account
+  holding a little test ETH
 
 ### Accounts / API keys you will need
 
-| Service | Used for | Where to get it |
-| --- | --- | --- |
-| MongoDB Atlas | Database | https://www.mongodb.com/cloud/atlas |
-| Google AI Studio | Gemini Vision API key | https://aistudio.google.com/app/apikey |
-| Cloudinary | Image hosting | https://cloudinary.com |
-| Google Cloud Console | OAuth 2.0 Client ID/Secret | https://console.cloud.google.com/apis/credentials |
-| Gmail App Password | Sending email | https://myaccount.google.com/apppasswords |
-| Alchemy or Infura | Sepolia RPC URL | https://alchemy.com · https://infura.io |
-| Etherscan | Contract verification API key | https://etherscan.io/myapikey |
-| Sepolia faucet | Test ETH | https://sepoliafaucet.com |
+Nothing here costs money. Gemini, Cloudinary, Alchemy and Etherscan all have free tiers
+sufficient for this project, and Sepolia ETH comes from a faucet.
+
+| Service | Used for | Env var(s) | Where to get it |
+| --- | --- | --- | --- |
+| MongoDB Atlas | the database | `MONGO_URI`, `MONGO_DB_NAME` | https://www.mongodb.com/cloud/atlas |
+| Google AI Studio | Gemini Vision — relevance, cost, work checks | `GEMINI_API_KEY` | https://aistudio.google.com/app/apikey |
+| Cloudinary | image hosting | `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` | https://cloudinary.com |
+| Google Cloud Console | OAuth 2.0 sign-in | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `VITE_GOOGLE_CLIENT_ID` | https://console.cloud.google.com/apis/credentials |
+| Gmail App Password | sending notification email | `EMAIL_USER`, `EMAIL_PASS` | https://myaccount.google.com/apppasswords |
+| Alchemy (or Infura) | Sepolia RPC endpoint | `SEPOLIA_RPC_URL` | https://alchemy.com · https://infura.io |
+| Etherscan | contract verification | `ETHERSCAN_API_KEY` | https://etherscan.io/myapikey |
+| MetaMask | the admin signs every payment | — (browser extension) | https://metamask.io |
+| Sepolia faucet | test ETH for the admin wallet | — | https://sepoliafaucet.com |
+
+> **`JWT_SECRET` is not from a service — you generate it.** Use
+> `openssl rand -base64 48`. The server refuses to start on a secret under 32 characters
+> or a known placeholder, because anyone who guesses it can forge a session token for any
+> account, including an administrator.
+
+---
+
+### 1. Install
+
+```bash
+git clone <repo-url> openInfra
+cd openInfra
+npm install          # one install covers all three workspaces
+```
+
+### 2. Create the three env files
+
+```bash
+cp server/.env.example     server/.env
+cp client/.env.example     client/.env
+cp blockchain/.env.example blockchain/.env
+```
+
+### 3. Fill in the minimum to boot
+
+Only two variables are required for the server to start. Everything else is a *feature
+group*: it is reported as not ready at boot and fails only if you use it.
+
+In `server/.env`:
+
+```ini
+MONGO_URI=mongodb+srv://user:pass@cluster.mongodb.net/?retryWrites=true&w=majority
+MONGO_DB_NAME=openinfra
+JWT_SECRET=<paste the output of: openssl rand -base64 48>
+```
+
+> Set `MONGO_DB_NAME` explicitly. An Atlas URI with no database path makes Mongoose
+> silently use a database called `test`, and your data appears to vanish.
+
+Turn on fixture mode so nothing external is needed yet:
+
+```ini
+MOCK_EXTERNAL=true
+```
+
+### 4. Run it
+
+```bash
+npm run dev          # server on :5000, client on :5173
+```
+
+Check the server came up and see which integrations are live:
+
+```bash
+curl http://localhost:5000/api/health
+```
+
+Create the first administrator — the admin role is never self-assignable through the API,
+so this script is the only way to make one:
+
+```bash
+npm run create-admin --workspace server -- \
+  --email you@example.com --password "at-least-8-chars" --name "Your Name"
+```
+
+Open http://localhost:5173, register a citizen and a contractor through the UI, and sign in
+as the admin. The whole flow works in fixture mode except the real on-chain steps.
+
+---
+
+### 5. Gemini and Cloudinary (real AI and uploads)
+
+In `server/.env`, add the keys and turn fixture mode off:
+
+```ini
+GEMINI_API_KEY=...
+GEMINI_MODEL=gemini-2.5-flash
+CLOUDINARY_CLOUD_NAME=...
+CLOUDINARY_API_KEY=...
+CLOUDINARY_API_SECRET=...
+MOCK_EXTERNAL=false
+```
+
+The free Gemini tier allows a limited number of requests per day, and one citizen report
+spends two (relevance, then cost). `MOCK_AI=true` keeps fixtures for the AI while leaving
+real uploads on — see [Fixture mode](#fixture-mode-running-without-api-quota).
+
+### 6. Google OAuth (optional)
+
+Create an OAuth 2.0 Client ID, add
+`http://localhost:5000/api/auth/google/callback` as an authorised redirect URI, then set
+`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` in `server/.env` and the **same client id** as
+`VITE_GOOGLE_CLIENT_ID` in `client/.env`.
+
+### 7. Email (optional)
+
+Gmail needs an **App Password**, not your account password, and 2FA must be on. Set
+`EMAIL_USER` and `EMAIL_PASS`. Leave them blank and email runs in **preview mode**: every
+message is written to `server/.email-preview/` as HTML you can open in a browser, which is
+the better way to check templates anyway. A failed send is never fatal — it is logged, and
+never rolls back a payment or an on-chain action.
+
+### 8. The smart contract
+
+A contract is **already deployed and verified** on Sepolia, so you can point at it instead
+of deploying your own:
+
+```ini
+# server/.env
+CONTRACT_ADDRESS=0x0e1aDF967b3f6dCE355C8509B816F33356abeF3F
+CONTRACT_DEPLOY_BLOCK=11851337
+SEPOLIA_RPC_URL=https://eth-sepolia.g.alchemy.com/v2/<your-key>
+CHAIN_ID=11155111
+```
+
+```ini
+# client/.env
+VITE_CONTRACT_ADDRESS=0x0e1aDF967b3f6dCE355C8509B816F33356abeF3F
+VITE_CHAIN_ID=0xaa36a7
+```
+
+> Check the RPC host is **`eth-sepolia`**, not `eth-mainnet`. A mainnet URL with a Sepolia
+> chain id pin fails confusingly, and it is an easy copy-paste mistake.
+
+Releasing funds requires the wallet that **owns** that contract, which you will not have.
+To run the on-chain half yourself, deploy your own:
+
+```bash
+cd blockchain
+# blockchain/.env needs SEPOLIA_RPC_URL, PRIVATE_KEY (a throwaway testnet key),
+# and ETHERSCAN_API_KEY
+npm test                        # 40 unit tests on the local network first
+npm run deploy:sepolia          # prints the address and the deploy block
+npm run verify:sepolia -- <address> <admin-address>
+```
+
+Put the new address and deploy block into `server/.env` and `client/.env`, then run
+`npm run sync-abi --workspace server` if you changed the contract's interface.
+
+The deploying account becomes the contract owner and is the only account that can release
+funds. Import it into MetaMask and use it as your admin wallet.
+
+### Running the on-chain flow
+
+1. Sign in as the admin, connect MetaMask, and switch it to Sepolia.
+2. Publish a report as a project, award it to a contractor, and define the milestones.
+3. **Lock escrow funds** — MetaMask asks you to sign the deposit.
+4. As the contractor, upload a progress photo for milestone 1.
+5. As the admin, approve it — MetaMask asks you to sign the release.
+6. Watch it appear on the public dashboard at `/transparency`, with a live Etherscan link.
 
 ---
 
@@ -143,6 +378,69 @@ Every response uses one envelope, so the frontend never has to guess a payload s
 
 `details` appears on validation failures. `stack` is added for unexpected errors in
 development only — never in production.
+
+### Every endpoint at a glance
+
+42 routes. "Access" is enforced by middleware on the route and, where ownership matters,
+again in the service. Sample requests and responses for each are in the sections below.
+
+| Method | Path | Access | Purpose |
+|---|---|---|---|
+| GET | `/api/health` | public | liveness, DB ping, which integrations are ready |
+| GET | `/` | public | API banner and version |
+| **Auth** | | | |
+| POST | `/api/auth/register` | public | create a citizen or contractor account |
+| POST | `/api/auth/login` | public | email + password, returns a JWT |
+| POST | `/api/auth/logout` | public | client-side token discard |
+| GET | `/api/auth/google` | public | begin Google OAuth |
+| GET | `/api/auth/google/callback` | public | OAuth return; token in the URL **fragment** |
+| GET | `/api/auth/me` | any signed in | the current user |
+| PATCH | `/api/auth/wallet` | any signed in | set the caller's wallet address |
+| GET | `/api/auth/users` | admin | list accounts |
+| **Reports** | | | |
+| POST | `/api/reports` | citizen | photo upload, AI relevance gate, cost estimate |
+| GET | `/api/reports/mine` | any signed in | the caller's reports |
+| GET | `/api/reports/mine/stats` | any signed in | the caller's report counts |
+| GET | `/api/reports/:id` | owner or admin | one report (404 to anyone else) |
+| DELETE | `/api/reports/:id` | owner | withdraw a pending or rejected report |
+| **Projects** | | | |
+| GET | `/api/projects` | any signed in | projects open for bidding |
+| GET | `/api/projects/mine` | contractor | projects awarded to the caller |
+| GET | `/api/projects/:id` | any signed in | one project |
+| **Bids** | | | |
+| POST | `/api/bids` | contractor | submit a bid; scored for anomaly on the way in |
+| GET | `/api/bids/mine` | contractor | the caller's bids |
+| PATCH | `/api/bids/:id/withdraw` | contractor | withdraw an undecided bid |
+| **Milestones** | | | |
+| GET | `/api/milestones/mine` | contractor | the caller's milestones across projects |
+| POST | `/api/milestones/:id/progress` | contractor | progress photo, AI work verification |
+| GET | `/api/milestones/project/:projectId` | assigned contractor or admin | full schedule and progress |
+| **Admin** | | | |
+| GET | `/api/admin/stats` | admin | dashboard counts |
+| GET | `/api/admin/reports` | admin | the review queue |
+| PATCH | `/api/admin/reports/:id/approve` | admin | approve a report |
+| PATCH | `/api/admin/reports/:id/reject` | admin | reject with a reason |
+| POST | `/api/admin/reports/:id/publish` | admin | publish as a project open for bids |
+| GET | `/api/admin/projects/:id/bids` | admin | all bids, flagged ones marked |
+| POST | `/api/admin/projects/:id/award` | admin | award and define the milestone schedule |
+| POST | `/api/admin/projects/:id/lock-funds/prepare` | admin | unsigned deposit transaction |
+| POST | `/api/admin/projects/:id/lock-funds/confirm` | admin | verify and record the deposit |
+| POST | `/api/admin/projects/:id/sync-from-chain` | admin | reconcile the record from the contract |
+| POST | `/api/admin/projects/:id/reconcile` | admin | alias of the above |
+| GET | `/api/admin/milestones` | admin | the milestone review queue |
+| POST | `/api/admin/milestones/:id/approve/prepare` | admin | unsigned release transaction |
+| POST | `/api/admin/milestones/:id/approve/confirm` | admin | verify and record the payment |
+| PATCH | `/api/admin/milestones/:id/reject` | admin | reject with a reason; contractor may resubmit |
+| GET | `/api/admin/escrow-contract` | admin | contract address, live `owner()`, chain id |
+| **Public — no login** | | | |
+| GET | `/api/public/stats` | public | platform totals |
+| GET | `/api/public/activity` | public | recent on-chain and off-chain activity |
+| GET | `/api/public/projects` | public | every project, redacted |
+| GET | `/api/public/projects/:id` | public | one project with milestones and bids |
+| GET | `/api/public/projects/:id/verify` | public | compare the record against the chain live |
+
+All `/api/public` routes are separately rate limited and pass every field through explicit
+redaction — see [What is published, and what is not](#what-is-published-and-what-is-not).
 
 ### Error codes
 
@@ -854,43 +1152,118 @@ The prompt is deliberately sceptical, and says so: the contractor supplying the 
 the party who gets paid if it passes, so a model that defaults to agreeable would make the
 gate a formality.
 
-### `POST /api/admin/milestones/:id/approve`
+### `POST /api/admin/milestones/:id/approve/prepare`
 
-**Admin only.** Approves the work and **releases the funds on-chain**. Synchronous — it
-waits for the transaction to be mined so the response can carry the hash.
+**Admin only.** Step 1 of two. Returns an **unsigned** transaction for the admin's MetaMask
+to sign. The server holds no private key, so this is as far as it can take a payment on its
+own. Nothing is written to the database — a prepared transaction the official never
+approves must leave no trace.
+
+Send the wallet that will sign, so the release is simulated as the real caller:
+
+```json
+{ "walletAddress": "0x7D28330Ef4918b5d6Ad37b0f95a00764F8c8CC34" }
+```
 
 ```json
 {
+  "success": true,
+  "message": "Transaction prepared. Sign it in your wallet to release the funds.",
   "data": {
-    "milestone": { "status": "paid", "transactionHash": "0x5ac16c...", "blockNumber": 11851541, "gasUsed": "146610" },
-    "transactionHash": "0x5ac16c...",
-    "explorerUrl": "https://sepolia.etherscan.io/tx/0x5ac16c...",
-    "projectCompleted": false,
-    "project": { "status": "in_progress", "totalReleasedFunds": "1200000000000000" }
+    "transaction": {
+      "to": "0x0e1aDF967b3f6dCE355C8509B816F33356abeF3F",
+      "data": "0x6c3e4f21000000...",
+      "value": "0x0"
+    },
+    "evidenceHash": "0xca19bad0aacb17658c0b76e45985cfc1193d2a55180123012d82567b9c809274",
+    "milestone": {
+      "id": "6ac493b17f7ea1f37629bd3f",
+      "number": 1,
+      "amountWei": "1200000000000000",
+      "displayAmount": "0.0012 ETH"
+    },
+    "project": { "id": "6ac48fed7f7ea1f37629bc1c", "title": "Urgent work in Aurangabad" }
   }
 }
 ```
 
-A keccak256 hash of the approval record — progress photo, AI verdict, approving admin,
-timestamp — is written **on-chain** with the payment, so a citizen can check that a payout
-had a documented basis.
+The call is **simulated first** (`eth_call`), so an already-paid milestone is refused here
+rather than after the official has approved a transaction that then reverts and costs them
+gas for nothing. The simulation runs as the wallet that will sign: `releaseMilestone` is
+`onlyOwner`, and a simulation with no caller is made by the zero address, which fails the
+ownership check every time regardless of who is connected.
+
+| Refusal | Status | Meaning |
+|---|---|---|
+| `MilestoneAlreadyReleased` | 409 | already paid on-chain; cannot be paid twice |
+| `ProjectNotFunded` | 409 | the escrow was never funded |
+| `MilestoneIndexOutOfRange` | 400 | no such milestone in the contract |
+| `OwnableUnauthorizedAccount` | 403 | that wallet is not the contract owner |
+
+A keccak256 hash of the approval record — progress photo, AI verdict, approving admin — is
+written **on-chain** with the payment, so a citizen can check that a payout had a documented
+basis. It deliberately contains no timestamp, because `prepare` and `confirm` must derive
+the same hash and the official may take a minute to approve in MetaMask.
 
 **Overriding the AI.** An AI rejection is a gate, not a verdict; the model can be wrong
 about a sound repair (bad angle, poor light, unusual surface), and without an escape hatch
 the contractor would be locked out of payment permanently. An admin may approve anyway:
 
 ```json
-{ "overrideAiRejection": true, "justification": "Site inspection confirms the carriageway has been properly reinstated." }
+{
+  "overrideAiRejection": true,
+  "justification": "Site inspection confirms the carriageway has been properly reinstated.",
+  "walletAddress": "0x7D28330Ef4918b5d6Ad37b0f95a00764F8c8CC34"
+}
 ```
 
 The justification is required (at least 20 characters), stored on the milestone, **and
 hashed into the on-chain evidence** — so overruling the machine is a recorded act, not a
 quiet click.
 
-Statuses move `submitted` to `approving` to `paid`. The intermediate state matters: if
-the process dies mid-flight the milestone is visibly stuck rather than silently reading
-unpaid while the money has moved. A retry cannot double-pay — the contract reverts
-`MilestoneAlreadyReleased`, surfaced as **409**.
+### `POST /api/admin/milestones/:id/approve/confirm`
+
+**Admin only.** Step 2. Takes the hash MetaMask produced and records the payment — but only
+after verifying it against the chain. The browser is not trusted to tell the truth about
+what it broadcast.
+
+```json
+{ "transactionHash": "0x40aa4bfe2f8efca72cee560ec4fdf9a9affc4a6a2685e0cda72f769ee696f14e" }
+```
+
+```json
+{
+  "data": {
+    "milestone": {
+      "status": "paid",
+      "transactionHash": "0x40aa4bfe...",
+      "blockNumber": 11856564,
+      "gasUsed": "146610"
+    },
+    "explorerUrl": "https://sepolia.etherscan.io/tx/0x40aa4bfe...",
+    "projectCompleted": false,
+    "project": { "status": "in_progress", "totalReleasedFunds": "1200000000000000" }
+  }
+}
+```
+
+The receipt must have succeeded **and** contain a `MilestoneReleased` event emitted by the
+escrow contract for this project id, this milestone index, and this evidence hash. A hash
+from an unrelated transaction, or from the release of a different milestone, is rejected
+with **422**.
+
+Verification is by **event emitter**, not by the transaction's recipient. A wallet may
+legitimately reach the contract through another address: MetaMask's smart-account batching
+(EIP-7702) routes the call through a delegation contract, so `receipt.to` is the smart
+account and the escrow appears only as the emitter of the log. Filtering by emitter is also
+strictly stronger than checking `to` — only the escrow can emit a log bearing its own
+address, whereas a transaction *sent* to the escrow could revert in an inner call and emit
+nothing at all.
+
+A repeat confirmation of a payment already recorded is treated as a **retry, not an error**,
+so a flaky connection cannot make a completed payment look like a failure. The hash is also
+written to the milestone *before* verification begins — see
+[Recovering from an interrupted confirmation](#recovering-from-an-interrupted-confirmation).
 
 ### `PATCH /api/admin/milestones/:id/reject`
 
@@ -912,33 +1285,104 @@ has in fact been paid.
 
 ---
 
-## Transaction signing: the current trade-off
+## Transaction signing
 
-Phase 7 signs `lockFunds` and `releaseMilestone` with a **server-side key**
-(`CHAIN_ADMIN_PRIVATE_KEY`). This is a real weakness and worth stating plainly:
+Every on-chain action is signed by **the admin's own MetaMask**. The server holds no private
+key: `CHAIN_ADMIN_PRIVATE_KEY` existed during Phase 7, when there was no browser in the
+loop, and was deleted in Phase 9.
 
-- Anyone who can read the server's environment — a logging mistake, a compromised
-  dependency, a leaked backup — can release **every** milestone of **every** project
-  immediately, paying for work never done. The contract's "admin can never withdraw"
-  guarantee still holds, so funds can only reach the awarded contractors, but that is
-  cold comfort.
-- Every payment becomes an act of *the platform* rather than of an identifiable official.
-  The on-chain record shows the admin wallet approved a release — which is exactly the
+Why that is the design and not a nicety:
+
+- A server-held key means anyone who can read the server's environment — a logging mistake,
+  a compromised dependency, a leaked backup — can release **every** milestone of **every**
+  project immediately, paying for work never done. The contract's "admin can never
+  withdraw" guarantee still holds, so funds can only ever reach the awarded contractor, but
+  that is cold comfort.
+- Every payment would become an act of *the platform* rather than of an identifiable
+  official. The on-chain record showing which wallet approved a release **is** the
   accountability this project exists to provide, and it is undermined if the signature was
   produced by a web server reacting to an HTTP request.
 
-It is here because Phase 7 is a backend phase with no browser in the loop, and the
-milestone flow had to be demonstrable end to end before the frontend existed.
+See [Signing moved to MetaMask](#signing-moved-to-metamask) below for the
+prepare → sign → confirm mechanics and the checks performed on the way back.
 
-**Recommendation: move signing to the admin's MetaMask in Phase 9 and delete this key.**
-The backend should prepare an unsigned transaction, the admin's wallet should sign it, and
-the backend should record the resulting hash. That makes each payout a deliberate act by a
-named official holding their own key. The seam already exists — `chain.service.js`
-exports `buildReleaseTransaction()`, which returns the identical call as unsigned
-calldata, so Phase 9 swaps the caller rather than the contract or the data model.
+---
 
-Until then: the key is a throwaway testnet account, it never appears in a log line, and the
-double-release guard is enforced on-chain rather than in application code.
+## Recovering from an interrupted confirmation
+
+`prepare → sign → confirm` has a gap that no amount of care in the happy path removes: the
+transaction is broadcast by the browser, and only the browser knows its hash until it tells
+the server. Close the tab, lose the connection, or kill the laptop in that window and the
+money has moved while the database never heard about it.
+
+This happened during live testing, twice, in two different ways. Both are now handled.
+
+**The hash is recorded before it is verified.** `confirm` used to verify for up to 120
+seconds *before* writing anything, so an interruption destroyed the only copy of the hash.
+A project now stores `pendingFundingTxHash`, and a milestone `pendingTxHash`, the instant the
+browser reports it — clearly separate from the verified `fundingTxHash` / `transactionHash`
+fields, so an unverified hash can never be mistaken for proof of payment on the public
+record.
+
+**Confirmation and preparation are both idempotent.** Re-confirming a payment already
+recorded returns success rather than a 409, because a flaky connection should not make a
+completed payment look like a failure. Preparing a deposit for a project already funded
+on-chain reconciles instead of refusing — refusing left the project permanently stuck,
+showing a "lock the funds" prompt that could never succeed.
+
+### `POST /api/admin/projects/:id/sync-from-chain`
+
+**Admin only.** Also available as `POST /api/admin/projects/:id/reconcile`.
+
+Reads the escrow contract and corrects the local record to match. **One-way**: it never
+writes on-chain, so it is always safe to press.
+
+```json
+{
+  "success": true,
+  "message": "Reconciled from the chain: 3 correction(s) applied.",
+  "data": {
+    "corrections": [
+      {
+        "milestone": 1,
+        "from": "submitted",
+        "to": "paid",
+        "reason": "released on-chain in 0x40aa4bfe..."
+      },
+      {
+        "field": "totalReleasedFunds",
+        "from": "2800000000000000",
+        "to": "4000000000000000",
+        "reason": "read from the contract"
+      },
+      { "field": "status", "from": "in_progress", "to": "completed" }
+    ]
+  }
+}
+```
+
+What it reconciles: a missing `onChainProjectId`, an unrecorded deposit, milestones released
+on-chain but not locally, the released total, and the project status.
+
+It corrects in **one direction only**. A milestone the database thinks is paid but the chain
+says is not is the dangerous direction, so it is reported with `requiresAttention: true` and
+logged as an error rather than silently "fixed".
+
+**Recovering a lost hash.** The contract records `fundedAt` and `releasedAt` itself, so the
+exact second is known. A binary search over block timestamps turns that into a block in
+roughly fourteen cheap calls, and one narrow `eth_getLogs` window then finds the event.
+Scanning from the deployment block is not an option — Alchemy's free tier caps a single
+`eth_getLogs` at **ten blocks** (`RPC_LOG_WINDOW`), and estimating the block from an
+off-chain timestamp proved to be hours out. If the log still cannot be found, a recorded
+`pendingTxHash` is adopted, since the contract has already confirmed the payment happened.
+
+**Completion follows the milestones, never the total.** The contract's own completion flag
+tracks the released amount, so it flips as soon as the last wei leaves escrow — even if one
+milestone's payment was never recorded. Treating that as sufficient would close the project
+and strand that milestone, because an approval cannot be released against a completed
+project. A project is marked completed only when **every** milestone reads paid, after each
+has been reconciled against the chain; a contract reporting everything released while a
+milestone reads unpaid is surfaced for attention instead.
 
 ---
 
@@ -1029,7 +1473,11 @@ npm run smoke             # live lock + release, prints Etherscan links
 - [x] **Phase 8** — Consolidated notification service
 - [x] **Phase 9** — React frontend
 - [x] **Phase 10** — Public transparency dashboard
-- [ ] **Phase 11** — Polish, docs & tests
+- [x] **Phase 11** — Polish, docs & tests
+
+All eleven phases are complete, and the full flow has been exercised end to end against
+live Sepolia: a real report, a real AI estimate, a real bid, a real escrow deposit, and
+three real milestone payments signed in MetaMask and verified on Etherscan.
 
 ---
 
@@ -1241,12 +1689,20 @@ transaction
 
 1. exists and was mined,
 2. succeeded (`status === 1`),
-3. was sent to **our** contract address, not a look-alike,
-4. emitted the expected event (`FundsLocked` / `MilestoneReleased`), and
-5. carries the right arguments — the specific `projectId` and `milestoneIndex` being claimed.
+3. emitted the expected event (`FundsLocked` / `MilestoneReleased`) **from our contract
+   address** — the logs are filtered by emitter, not by where the transaction was sent, and
+4. carries the right arguments — the specific `projectId`, `milestoneIndex` and
+   `evidenceHash` being claimed.
 
 A forged hash, an unrelated transaction, or a release of a *different* milestone is rejected
 with a 422 and nothing is recorded.
+
+Checking the emitter rather than `receipt.to` matters in both directions. A wallet can
+legitimately reach the contract through another address — MetaMask's smart-account batching
+routes the call through a delegation contract — so requiring `to` to be the escrow rejects
+real payments. It is also the weaker test: a transaction *sent* to the escrow could revert in
+an inner call and emit nothing, whereas only the escrow can emit a log bearing its own
+address.
 
 ### Other safeguards
 

@@ -3,7 +3,15 @@ import { Link } from 'react-router-dom';
 import { reportApi } from '../../services/api.js';
 import { useFetch } from '../../hooks/useFetch.js';
 import { useAuth } from '../../context/AuthContext.jsx';
-import { Button, Card, Stat, StatusBadge, LoadingState, EmptyState } from '../../components/ui.jsx';
+import {
+  Button,
+  Card,
+  Stat,
+  StatusBadge,
+  LoadingState,
+  ErrorState,
+  EmptyState,
+} from '../../components/ui.jsx';
 import { money, timeAgo } from '../../lib/format.js';
 
 export const CitizenHome = () => {
@@ -25,8 +33,11 @@ export const CitizenHome = () => {
         </p>
       </header>
 
+      {/* An error must not fall through to zeros, which read as "nothing yet". */}
       {stats.loading ? (
         <LoadingState label="Loading your activity…" />
+      ) : stats.error ? (
+        <ErrorState message={stats.error} onRetry={stats.refetch} />
       ) : (
         <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
           <Stat label="Reported" value={s?.total ?? 0} icon="📍" />
@@ -73,6 +84,8 @@ export const CitizenHome = () => {
 
         {recent.loading ? (
           <LoadingState label="Loading…" className="py-10" />
+        ) : recent.error ? (
+          <ErrorState message={recent.error} onRetry={recent.refetch} />
         ) : reports.length === 0 ? (
           <EmptyState
             icon="📭"

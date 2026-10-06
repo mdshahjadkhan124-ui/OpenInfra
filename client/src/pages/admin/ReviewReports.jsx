@@ -328,8 +328,15 @@ const PublishModal = ({ report, onClose, onDone }) => {
           </Alert>
         )}
 
+        {/*
+          The grid stacks on the narrowest screens. The read-only range
+          triplets elsewhere stay three-across because they are short centred
+          amounts and the side-by-side layout is what makes them read as a
+          range; these are editable number inputs, which become unusable at
+          roughly 88px each on a 320px phone.
+        */}
         {!hasAiEstimate && (
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 gap-3 min-[400px]:grid-cols-3">
             {[
               ['minAmount', 'Lowest'],
               ['amount', 'Expected'],

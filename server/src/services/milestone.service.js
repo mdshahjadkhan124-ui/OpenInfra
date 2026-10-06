@@ -297,10 +297,33 @@ export const confirmLockFunds = async (projectId, admin, { transactionHash } = {
   return { project, milestones, receipt };
 };
 
-/** Milestones of a project, in order. */
-export const listMilestonesForProject = async (projectId) => {
+/**
+ * Milestones of a project, in order, for a participant.
+ *
+ * This returns the FULL milestone records — the AI verdict in detail, the
+ * rejection reason, the reviewing admin, and `overrideJustification`, which is
+ * an official's internal reasoning for overruling the machine. The public
+ * dashboard deliberately redacts those (see public.service.publicMilestone),
+ * so this endpoint must not be the back door around it: being signed in as
+ * any citizen or as a losing bidder is not a reason to read a competitor's
+ * submission history or an admin's internal notes.
+ *
+ * Restricted to the contractor doing the work and to admins. Anyone else gets
+ * a 404 rather than a 403, matching the rest of the codebase: a 403 would
+ * confirm the project exists and let an outsider enumerate ids. The public,
+ * redacted view of the same project stays available at /api/public.
+ */
+export const listMilestonesForProject = async (projectId, requester) => {
   const project = await Project.findById(projectId);
   if (!project) throw new NotFoundError('Project not found.');
+
+  const isAdmin = requester?.role === ROLES.ADMIN;
+  const isAssignedContractor =
+    project.awardedContractor && project.awardedContractor.toString() === requester?.id;
+
+  if (!isAdmin && !isAssignedContractor) {
+    throw new NotFoundError('Project not found.');
+  }
 
   const milestones = await Milestone.find({ project: project._id }).sort({ number: 1 });
 
