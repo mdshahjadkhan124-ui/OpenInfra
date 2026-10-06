@@ -169,4 +169,16 @@ export const adminApi = {
   reconcile: (projectId) => unwrap(api.post(`/admin/projects/${projectId}/reconcile`)),
 };
 
+// ---------------------------------------------------------------------------
+// Public — no authentication. The transparency dashboard's data.
+// ---------------------------------------------------------------------------
+export const publicApi = {
+  stats: () => unwrap(api.get('/public/stats')),
+  activity: (params) => unwrap(api.get('/public/activity', { params })),
+  projects: (params) => unwrapFull(api.get('/public/projects', { params })),
+  project: (id) => unwrap(api.get(`/public/projects/${id}`)),
+  /** Live comparison against the chain. Never cached. */
+  verify: (id) => unwrap(api.get(`/public/projects/${id}/verify`)),
+};
+
 export default api;

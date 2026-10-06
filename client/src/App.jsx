@@ -15,6 +15,7 @@ import { ROLES } from './lib/constants.js';
 
 import { Landing } from './pages/public/Landing.jsx';
 import { Transparency } from './pages/public/Transparency.jsx';
+import { ProjectDetail } from './pages/public/ProjectDetail.jsx';
 import { NotFound } from './pages/public/NotFound.jsx';
 
 import { Login } from './pages/auth/Login.jsx';
@@ -41,8 +42,8 @@ export const App = () => (
     <Route element={<PublicLayout />}>
       <Route index element={<Landing />} />
       <Route path="transparency" element={<Transparency />} />
-      {/* Deep links from emails land here until Phase 10 adds detail pages. */}
-      <Route path="transparency/projects/:id" element={<Transparency />} />
+      {/* Emails and in-app links point here; both resolve to a real page. */}
+      <Route path="transparency/projects/:id" element={<ProjectDetail />} />
     </Route>
 
     {/* ------------------------------------------------------------ auth */}

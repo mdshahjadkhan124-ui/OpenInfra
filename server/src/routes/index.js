@@ -10,6 +10,7 @@ import adminRoutes from './admin.routes.js';
 import projectRoutes from './project.routes.js';
 import bidRoutes from './bid.routes.js';
 import milestoneRoutes from './milestone.routes.js';
+import publicRoutes from './public.routes.js';
 
 const router = Router();
 
@@ -20,6 +21,6 @@ router.use('/admin', adminRoutes);
 router.use('/projects', projectRoutes);
 router.use('/bids', bidRoutes);
 router.use('/milestones', milestoneRoutes);
-// Phase 10: router.use('/public', publicRoutes);
+router.use('/public', publicRoutes);
 
 export default router;

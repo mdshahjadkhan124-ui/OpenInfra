@@ -1028,7 +1028,7 @@ npm run smoke             # live lock + release, prints Etherscan links
 - [x] **Phase 7** — Milestones + AI verification + fund release
 - [x] **Phase 8** — Consolidated notification service
 - [x] **Phase 9** — React frontend
-- [ ] **Phase 10** — Public transparency dashboard
+- [x] **Phase 10** — Public transparency dashboard
 - [ ] **Phase 11** — Polish, docs & tests
 
 ---
@@ -1301,6 +1301,98 @@ MOCK_EXTERNAL=true npm run dev --workspace server   # mock AI, uploads, chain an
 
 Or individually: `MOCK_AI`, `MOCK_UPLOADS`, `MOCK_CHAIN`, `MOCK_EMAIL`. All are forced on
 under `NODE_ENV=test`, so `npm test` needs no credentials at all.
+
+---
+
+---
+
+## Public transparency dashboard
+
+No login, no account, no API key. `/transparency` and
+`/transparency/projects/:id` are the pages every link in the app and in every email
+resolves to.
+
+### Endpoints
+
+| Endpoint | Returns |
+| --- | --- |
+| `GET /api/public/stats` | platform totals: funds locked and released, project and bid counts |
+| `GET /api/public/activity` | recent on-chain money movements, newest first |
+| `GET /api/public/projects` | project list with filters, search and sort |
+| `GET /api/public/projects/:id` | one project: assessment, bids, milestones, payments |
+| `GET /api/public/projects/:id/verify` | **live comparison against the chain** |
+
+A separate router from `/api/projects` rather than an `optionalAuth` variant of it, because
+the two have different audiences and must be able to diverge: the authenticated view shows a
+contractor's email to an admin, and this one must never show it to anyone.
+
+Reads are cached for 60 seconds (30 for activity) — these are the only endpoints a crawler or
+a shared link can hammer, and the data changes on the order of minutes. `/verify` is
+`no-store`: its entire value is freshness, so a cached "everything matches" would defeat it.
+They also have their own rate limiter, since there is no login to throttle behind.
+
+### What is published, and what is not
+
+Every field is an explicit decision rather than a `.find()` with whatever the model holds. A
+transparency platform that leaks personal data is a worse problem than an opaque one.
+
+**Published**
+
+- The project, its photo, location, status and dates.
+- The AI cost assessment **in full, including its assumptions**. This is the benchmark bids
+  are judged against; publishing the number while hiding the reasoning would be worse than
+  publishing neither.
+- Every milestone, its share, its AI verdict, and the transaction that paid it.
+- The winning contractor's name and payout address. They won public money, and the address is
+  already visible on-chain — concealing it here would be theatre.
+- Every bid **amount** and its anomaly band, so the spread and the number flagged are visible.
+- The admin wallet that signed each payment, taken from the verified receipt.
+- When an official **overruled the AI**, with their written justification. That is exactly the
+  kind of decision a transparency platform should surface rather than bury.
+
+**Not published**
+
+- Any email address, ever.
+- The reporting citizen's full name. They are credited by **first name only**: reporting a
+  pothole should not put your full name on a public ledger page alongside your neighbourhood.
+- **Losing bidders' identities.** Their amounts and bands are published; their names are not.
+  A losing contractor publicly labelled "flagged", with no process to contest it, is a
+  reputational penalty the platform has no business imposing — the figure is the
+  accountability, the name would just be punishment. The winner is named, because that is
+  where the money went.
+- Internal review notes, admin user ids, and rejection reasons on reports that never became
+  projects.
+
+These rules are unit-tested directly against the shaping functions, so a regression fails the
+build rather than quietly leaking.
+
+### Check it against the chain
+
+The feature the dashboard exists for. Everything else on the page is this platform’s claim
+about itself; `/verify` reads the escrow contract live and compares, field by field:
+
+```
+available: true | allMatch: false
+
+  DIFFER  Total locked         ours=6000000000000000  chain=2000000000000000
+  DIFFER  Total released       ours=6000000000000000  chain=1200000000000000
+  DIFFER  Contractor address   ours=0xc7b7a4f5...     chain=0xd3b3b6ec...
+  DIFFER  stage 2 paid         ours=true              chain=false
+```
+
+**When they disagree it says so.** The panel reports the mismatch and states that the chain
+is authoritative, rather than showing the comfortable number. A dashboard that could only ever
+say "verified" would be worthless.
+
+Fetched on a deliberate click rather than on page load — it costs an RPC round trip, and
+making the visitor ask the question is the more honest framing.
+
+### Money arithmetic
+
+Every wei total is summed with `BigInt` in application code, never with `$sum` in an
+aggregation. Mongo would overflow a double on 1e18 values and silently return a wrong total —
+on this page, worse than showing nothing. Wei also crosses the wire as a **string**, so no
+precision is lost to JSON number parsing.
 
 ---
 

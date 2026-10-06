@@ -571,7 +571,7 @@ export const prepareMilestoneRelease = async (milestoneId, admin, options = {}) 
  * a different milestone, is rejected.
  */
 export const confirmMilestoneRelease = async (milestoneId, admin, { transactionHash, ...options } = {}) => {
-  const { milestone, project, isOverridableAiRejection } = await prepareApproval(
+  const { milestone, project, isOverridableAiRejection, evidenceHash } = await prepareApproval(
     milestoneId,
     admin,
     options
@@ -580,15 +580,24 @@ export const confirmMilestoneRelease = async (milestoneId, admin, { transactionH
   const receipt = await chain.confirmTransaction({
     transactionHash,
     expectEvent: 'MilestoneReleased',
+    // Not just "a release of this milestone" but one carrying OUR approval
+    // record. A transaction built elsewhere, with a different evidence hash,
+    // is refused — so the hash on-chain always corresponds to a decision this
+    // platform can produce the evidence for.
     matchArgs: {
       projectId: String(project.onChainProjectId),
       milestoneIndex: String(milestone.onChainIndex),
+      evidenceHash,
     },
   });
 
   milestone.status = MILESTONE_STATUS.PAID;
   milestone.reviewedBy = admin.id;
   milestone.reviewedAt = new Date();
+  // Persisted so the public record can show it and anyone can check it against
+  // the hash the contract emitted. prepareApproval derives it from a record
+  // with no timestamp, so this is the same value that went on-chain.
+  milestone.evidenceHash = evidenceHash;
   milestone.transactionHash = receipt.transactionHash;
   milestone.blockNumber = receipt.blockNumber;
   milestone.gasUsed = receipt.gasUsed;
