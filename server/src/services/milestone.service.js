@@ -945,10 +945,40 @@ export const syncProjectFromChain = async (projectId) => {
     project.totalReleasedFunds = onChain.releasedWei;
   }
 
+  /**
+   * Completed means EVERY milestone is paid — never "the contract says the
+   * total is released".
+   *
+   * These can disagree. The contract's own completion flag tracks the
+   * released total, so it flips as soon as the last wei leaves escrow even if
+   * one milestone's payment was never recorded here. Accepting that flag on
+   * its own would close a project while a milestone still read unpaid,
+   * stranding it: `prepareApproval` refuses to release against a completed
+   * project, so the milestone could never be recorded and the public ledger
+   * would permanently understate what was paid.
+   *
+   * Requiring every milestone to be paid locally — after step 3 above has
+   * already reconciled each one against the chain — means completion follows
+   * the milestones rather than racing ahead of them.
+   */
   const allPaid =
     milestones.length > 0 && milestones.every((m) => m.status === MILESTONE_STATUS.PAID);
 
-  if (onChain.completed || allPaid) {
+  if (onChain.completed && !allPaid) {
+    const unpaid = milestones.filter((m) => m.status !== MILESTONE_STATUS.PAID);
+    corrections.push({
+      field: 'status',
+      from: project.status,
+      to: project.status,
+      reason:
+        `the contract reports all funds released, but ${unpaid.length} milestone(s) ` +
+        `(#${unpaid.map((m) => m.number).join(', #')}) are not recorded as paid — ` +
+        'left open deliberately so they can still be reconciled',
+      requiresAttention: true,
+    });
+  }
+
+  if (allPaid) {
     if (project.status !== PROJECT_STATUS.COMPLETED) {
       corrections.push({ field: 'status', from: project.status, to: PROJECT_STATUS.COMPLETED });
       project.status = PROJECT_STATUS.COMPLETED;

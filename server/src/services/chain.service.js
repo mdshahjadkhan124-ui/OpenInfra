@@ -276,23 +276,33 @@ export const confirmTransaction = async ({ transactionHash, expectEvent, matchAr
     });
   }
 
-  // A transaction to a different address proves nothing about our escrow.
-  const expectedTo = config.chain.contractAddress.toLowerCase();
-  if ((receipt.to ?? '').toLowerCase() !== expectedTo) {
-    throw new ApiError(
-      422,
-      'That transaction was not sent to this platform\'s escrow contract.',
-      { code: 'TX_WRONG_CONTRACT' }
-    );
-  }
-
-  // Decode our own events out of the logs.
+  /**
+   * Verify by WHO EMITTED THE EVENT, not by where the transaction was sent.
+   *
+   * This used to require `receipt.to` to be the escrow address, which looks
+   * right and is wrong. A wallet may legitimately reach the contract through
+   * another address: MetaMask's smart-account batching (EIP-7702) routes the
+   * call through a delegation contract, so `to` is the smart account and the
+   * escrow appears only as the emitter of the log. A real milestone payment
+   * was rejected that way — the funds had moved and the contract had emitted
+   * MilestoneReleased, yet the platform refused to record it, leaving the
+   * contractor paid on-chain and unpaid on the public record.
+   *
+   * Filtering the logs by emitter is strictly stronger than the old check: it
+   * proves OUR contract performed the state change, whoever relayed it. The
+   * `to` address never proved that — a call to the escrow could revert in an
+   * inner call and emit nothing, while an event bearing our address can only
+   * be emitted by our address.
+   */
+  const escrowAddress = config.chain.contractAddress.toLowerCase();
   const escrowInterface = getInterface();
   const events = receipt.logs
+    .filter((log) => (log.address ?? '').toLowerCase() === escrowAddress)
     .map((log) => {
       try {
         return escrowInterface.parseLog(log);
       } catch {
+        // A log from our contract we have no ABI entry for. Not ours to read.
         return null;
       }
     })
@@ -302,7 +312,8 @@ export const confirmTransaction = async ({ transactionHash, expectEvent, matchAr
   if (!match) {
     throw new ApiError(
       422,
-      `That transaction did not emit a ${expectEvent} event, so it did not do what was claimed.`,
+      `That transaction did not emit a ${expectEvent} event from this platform's escrow contract, ` +
+        'so it did not do what was claimed.',
       { code: 'TX_WRONG_EVENT' }
     );
   }

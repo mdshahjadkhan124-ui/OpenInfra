@@ -168,3 +168,65 @@ test('the approve validator accepts a wallet address', async () => {
   const fields = approveMilestoneRules.flatMap((rule) => rule.builder?.fields ?? []);
   assert.ok(fields.includes('walletAddress'), 'walletAddress must be validated, not silently dropped');
 });
+
+// ---------------------------------------------------------------------------
+// A payment is proven by the event's emitter, not the transaction's recipient
+// ---------------------------------------------------------------------------
+
+test('confirmTransaction identifies escrow events by emitter address', () => {
+  /**
+   * `receipt.to` is not the escrow when a wallet batches the call through a
+   * smart account (MetaMask's EIP-7702 delegation does exactly this). A real
+   * milestone payment was refused on that basis while the contract had
+   * emitted MilestoneReleased and the funds had moved. Filtering logs by
+   * emitter is both correct for batching and strictly stronger: only our
+   * contract can emit a log bearing our address.
+   */
+  const source = readFileSync(
+    new URL('../src/services/chain.service.js', import.meta.url),
+    'utf8'
+  );
+
+  assert.match(
+    source,
+    /\.filter\(\(log\) => \(log\.address \?\? ''\)\.toLowerCase\(\) === escrowAddress\)/,
+    'logs must be filtered to those emitted by the escrow'
+  );
+  assert.doesNotMatch(
+    source,
+    /TX_WRONG_CONTRACT/,
+    'the receipt.to check must be gone — it rejects legitimate batched transactions'
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Completion follows the milestones, not the released total
+// ---------------------------------------------------------------------------
+
+test('a project is only completed when every milestone is paid', () => {
+  /**
+   * The contract's completion flag tracks the released TOTAL, so it flips as
+   * soon as the last wei leaves escrow — even if one milestone's payment was
+   * never recorded here. Honouring it alone would close the project and
+   * strand that milestone, because prepareApproval refuses to release against
+   * a completed project.
+   */
+  const source = readFileSync(
+    new URL('../src/services/milestone.service.js', import.meta.url),
+    'utf8'
+  );
+
+  assert.doesNotMatch(
+    source,
+    /if \(onChain\.completed \|\| allPaid\)/,
+    'on-chain completion must not be sufficient on its own'
+  );
+  assert.match(
+    source,
+    /if \(onChain\.completed && !allPaid\)/,
+    'the disagreement should be surfaced for attention'
+  );
+  // Both completion paths — release and sync — gate on every milestone.
+  const gates = source.match(/const allPaid =[\s\S]{0,160}?every\(\(m\) => m\.status === MILESTONE_STATUS\.PAID\)/g);
+  assert.ok(gates && gates.length >= 2, 'release and sync should each require all milestones paid');
+});
