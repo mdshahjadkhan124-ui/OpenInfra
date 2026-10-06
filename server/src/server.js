@@ -9,9 +9,16 @@ import { createApp } from './app.js';
 import { config, unconfiguredFeatures } from './config/env.js';
 import { connectDatabase, disconnectDatabase } from './config/db.js';
 import { logger } from './utils/logger.js';
+import { verifyTransport, closeTransport, emailMode } from './services/email/transport.js';
 
 const start = async () => {
   await connectDatabase();
+
+  // Check the mail credentials once at boot rather than on the first send, so
+  // a bad App Password shows up in the startup log instead of silently
+  // swallowing a citizen's notification hours later.
+  const mail = await verifyTransport();
+  logger.info(`Email mode: ${emailMode()}${mail.ok ? '' : ` (unverified: ${mail.error})`}`);
 
   const app = createApp();
   const server = app.listen(config.port, () => {
@@ -33,6 +40,7 @@ const start = async () => {
     logger.info(`${signal} received — shutting down.`);
     server.close(async () => {
       try {
+        closeTransport();
         await disconnectDatabase();
       } finally {
         process.exit(0);

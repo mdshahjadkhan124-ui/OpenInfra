@@ -1,13 +1,15 @@
 /**
  * Notification service — ONE place every platform email is sent from.
  *
- * Phase 8 replaces the body of `dispatch()` with a real Nodemailer transport
- * and HTML templates. Everything above it is already final: each event gets a
- * named function with a typed-ish payload, and the rest of the codebase calls
- * only those names. That is the whole point of landing this file in Phase 3
- * rather than Phase 8 — services call `notify.reportRejected(...)` from the
- * start, so Phase 8 is a transport swap, not a hunt through five services for
- * places that should have sent mail.
+ * Each event has a named function here, and the rest of the codebase calls
+ * only those names — never a transport or a template directly. That is why
+ * this file landed in Phase 3 with a stub body: services have been calling
+ * `notify.reportRejected(...)` since then, so Phase 8 replaced one function
+ * (`dispatch`) rather than hunting through five services for places that
+ * should have been sending mail.
+ *
+ * Rendering lives in `email/templates.js`, delivery in `email/transport.js`.
+ * Dispatch below is the only thing that knows both exist.
  *
  * Two rules every caller relies on:
  *
@@ -19,23 +21,34 @@
  */
 import { config } from '../config/env.js';
 import { logger } from '../utils/logger.js';
+import { render } from './email/templates.js';
+import { sendMail } from './email/transport.js';
 
 /**
  * Single choke point for delivery.
  *
- * PHASE 8: build the Nodemailer transport here, render `event` to an HTML
- * template, and send to `to`. Until then it logs, so the event sequence is
- * visible and testable without a mail server.
+ * Renders the event to HTML + plain text and hands it to the transport, which
+ * sends it, writes it to disk in preview mode, or logs it when unconfigured.
  */
 const dispatch = async ({ event, to, subject, data }) => {
-  if (!config.email.ready) {
-    logger.debug(`[notify:pending-transport] ${event} -> ${to} :: ${subject}`);
-    return { delivered: false, reason: 'transport-not-configured' };
+  if (!to) {
+    logger.warn(`Notification '${event}' has no recipient; skipping.`);
+    return { delivered: false, reason: 'no-recipient' };
   }
 
-  // PHASE 8: replace with the real send.
-  logger.debug(`[notify:stub] ${event} -> ${to} :: ${subject}`);
-  return { delivered: false, reason: 'not-implemented-until-phase-8' };
+  // Rendering is the one step that can throw on a programming error (an event
+  // with no template, a template reading a field the caller did not pass), so
+  // it is caught separately from delivery — a template bug should be loud in
+  // the logs but still must not reach the caller.
+  let rendered;
+  try {
+    rendered = render(event, data);
+  } catch (err) {
+    logger.error(`Could not render email for '${event}': ${err.message}`);
+    return { delivered: false, reason: 'render-failed', error: err.message };
+  }
+
+  return sendMail({ event, to, subject, html: rendered.html, text: rendered.text });
 };
 
 /**

@@ -73,6 +73,7 @@ const mockAll = isTest || read('MOCK_EXTERNAL', 'false') === 'true';
 const mockAi = mockAll || read('MOCK_AI', 'false') === 'true';
 const mockUploads = mockAll || read('MOCK_UPLOADS', 'false') === 'true';
 const mockChain = mockAll || read('MOCK_CHAIN', 'false') === 'true';
+const mockEmail = mockAll || read('MOCK_EMAIL', 'false') === 'true';
 
 const gemini = group(['GEMINI_API_KEY']);
 const cloudinary = group(['CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET']);
@@ -149,6 +150,13 @@ export const config = Object.freeze({
     user: read('EMAIL_USER'),
     pass: read('EMAIL_PASS'),
     fromName: read('EMAIL_FROM_NAME', 'OpenInfra'),
+    /**
+     * Render emails to disk instead of sending them. On under NODE_ENV=test
+     * and whenever MOCK_EMAIL is set, so the suite and routine development
+     * never spend Gmail's daily quota or reach a real inbox.
+     */
+    preview: mockEmail,
+    previewDir: read('EMAIL_PREVIEW_DIR', '.email-preview'),
   }),
 
   chain: Object.freeze({
@@ -184,7 +192,7 @@ export const unconfiguredFeatures = Object.entries({
   Gemini: mockAi ? { ready: true, missing: [] } : gemini,
   Cloudinary: mockUploads ? { ready: true, missing: [] } : cloudinary,
   'Google OAuth': googleOAuth,
-  Email: email,
+  Email: mockEmail ? { ready: true, missing: [] } : email,
   Blockchain: mockChain ? { ready: true, missing: [] } : chain,
 })
   .filter(([, g]) => !g.ready)

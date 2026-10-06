@@ -1026,10 +1026,129 @@ npm run smoke             # live lock + release, prints Etherscan links
 - [x] **Phase 5** — Bidding + 20% anomaly detection
 - [x] **Phase 6** — Solidity staged escrow on Sepolia
 - [x] **Phase 7** — Milestones + AI verification + fund release
-- [ ] **Phase 8** — Consolidated notification service
+- [x] **Phase 8** — Consolidated notification service
 - [ ] **Phase 9** — React frontend
 - [ ] **Phase 10** — Public transparency dashboard
 - [ ] **Phase 11** — Polish, docs & tests
+
+---
+
+---
+
+## Notifications
+
+One service sends every email on the platform. The rest of the codebase calls a named
+function per event and never touches a transport or a template:
+
+```js
+notify.milestoneApproved({ contractor, reporter, project, milestone, transactionHash, explorerUrl });
+```
+
+That shape landed in **Phase 3** with a stubbed body, so services have been calling it all
+along. Phase 8 replaced exactly one function — `dispatch()` — rather than hunting through
+five services for places that should have been sending mail.
+
+```
+notification.service.js   one named function per event (21 of them)
+  └── dispatch()          the only thing that knows both halves exist
+        ├── email/templates.js   event -> { html, text }
+        └── email/transport.js   Nodemailer, preview mode, retry policy
+              └── email/layout.js  shared blocks: tables, badges, buttons, proof panel
+```
+
+### The 21 events
+
+| Phase | Events |
+| --- | --- |
+| 3 | `report.received` · `report.rejected` · `report.awaiting_review` |
+| 4 | `report.approved` · `report.rejected_by_admin` · `project.published` · `project.open_for_bids` |
+| 5 | `bid.submitted` · `bid.received` · `bid.flagged` · `project.awarded` · `bid.not_selected` · `project.awarded_reporter` |
+| 7 | `escrow.funded` · `milestone.submitted` · `milestone.ai_rejected` · `milestone.rejected` · `milestone.paid.contractor` · `milestone.paid.citizen` · `project.completed.contractor` · `project.completed.citizen` |
+
+A test scrapes the event names out of the notification service and asserts each one has a
+template and each template has a sender — so adding a hook without a template fails the
+build instead of reaching someone as a blank email.
+
+### Email failures are never fatal
+
+A notification is a side effect of something that has **already succeeded** — a filed
+report, an awarded project, an on-chain payment. A dead mail server must not turn any of
+those into a failure. Three layers enforce that:
+
+1. Callers **do not await**. The citizen does not wait on Gmail to see their report was accepted.
+2. Every dispatch is wrapped so a rejection can never escape. This matters specifically
+   because `server.js` shuts down on an unhandled rejection — an unguarded mail error
+   would turn a Gmail outage into an outage here.
+3. Rendering is caught separately from delivery, so a template bug is loud in the logs
+   but still invisible to the caller.
+
+Verified by running the server with a deliberately wrong password: filing a report still
+returned **201 in 245 ms**, the report persisted, and the failure was logged as
+`Email 'report.received' ... could not be delivered`.
+
+### Retry policy
+
+Transient failures are retried with backoff; permanent ones are not. The decision is made
+from the **SMTP response code** (4xx transient, 5xx permanent) and the Node error code —
+deliberately not from a regex over the error text. An earlier version matched `/4\d\d/`
+against the message, and Gmail's rejection embeds a session id like `5a478bee46e88-…` whose
+"478" matched — so wrong credentials were retried three times, repeatedly presenting bad
+logins to Gmail. That is how a sending account gets throttled.
+
+### Preview mode
+
+Gmail allows roughly 500 sends a day, and nobody wants 21 test emails in a real inbox.
+
+| Variable | Effect |
+| --- | --- |
+| `MOCK_EMAIL=true` | render every email to `EMAIL_PREVIEW_DIR` (default `.email-preview/`) and send nothing |
+| `MOCK_EXTERNAL=true` | the same, alongside the AI, upload and chain mocks |
+
+**`NODE_ENV=test` forces it on**, so `npm test` needs no credentials and spends no quota.
+Each preview writes a `.html` and a `.txt` file with the event, recipient and subject in a
+header comment, so a file is self-describing when opened on its own.
+
+### Template notes
+
+- **Every email has a plain-text part.** Not decoration: a message with no text part is
+  markedly more likely to be spam-filtered, and it is the version screen readers and
+  watch notifications show. Tests assert both parts exist and that neither contains
+  `undefined`, `NaN` or `[object Object]`.
+- **Table-based with inline styles**, because that is what email clients actually render.
+  Templates compose from shared builders in `layout.js` rather than writing markup, so one
+  fix propagates everywhere.
+- **All interpolated text is escaped.** Rejection reasons, AI assessments and contractor
+  notes are user input that lands in HTML; a test fires `<script>` and `<img onerror>`
+  payloads through a template and asserts no tag survives.
+- **Wei renders as ETH with integer arithmetic**, never `Number` division.
+
+### The payment email
+
+The citizen's `milestone.paid.citizen` email is the one the whole project exists for. It
+carries the Etherscan transaction link in **both** the HTML and the text part, shows the
+exact ETH amount, and says plainly:
+
+> You do not have to take our word for it — this record is public and we cannot alter it.
+
+A transparency platform asserting "we paid them" is worth little. A link to a ledger it
+does not control is the actual claim.
+
+### Gmail setup
+
+```bash
+EMAIL_USER=you@gmail.com
+EMAIL_PASS=abcd efgh ijkl mnop   # a 16-character App Password
+```
+
+2-Step Verification must be on before Google will issue an App Password
+(https://myaccount.google.com/apppasswords). The transport **strips whitespace** from
+`EMAIL_PASS` before authenticating, because Google displays the password in four groups
+of four and pasting it verbatim otherwise fails with a misleading "Username and Password
+not accepted".
+
+Credentials are checked once at boot, so a bad password appears in the startup log rather
+than silently swallowing a citizen's notification hours later. A failed check is a warning,
+not a crash — the API works fine without email.
 
 ---
 
