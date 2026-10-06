@@ -338,9 +338,13 @@ To run the on-chain half yourself, deploy your own:
 
 ```bash
 cd blockchain
-# blockchain/.env needs SEPOLIA_RPC_URL, PRIVATE_KEY (a throwaway testnet key),
-# and ETHERSCAN_API_KEY
-npm test                        # 40 unit tests on the local network first
+
+# The 63 unit tests run on the in-process chain and need no configuration at
+# all — they work straight after `npm install`.
+npm test
+
+# Deploying does need blockchain/.env: SEPOLIA_RPC_URL, PRIVATE_KEY (a
+# throwaway testnet key, never one holding real funds), and ETHERSCAN_API_KEY.
 npm run deploy:sepolia          # prints the address and the deploy block
 npm run verify:sepolia -- <address> <admin-address>
 ```
@@ -1396,7 +1400,7 @@ milestone reads unpaid is surfaced for attention instead.
 | Verified source | [Etherscan](https://sepolia.etherscan.io/address/0x0e1aDF967b3f6dCE355C8509B816F33356abeF3F#code) · also [Blockscout](https://eth-sepolia.blockscout.com/address/0x0e1aDF967b3f6dCE355C8509B816F33356abeF3F#code) and [Sourcify](https://sourcify.dev/server/repo-ui/11155111/0x0e1aDF967b3f6dCE355C8509B816F33356abeF3F) |
 | Compiler | Solidity 0.8.28, optimizer on, 200 runs |
 | Toolchain | Hardhat 3.18 |
-| Tests | 57 passing |
+| Tests | 63 passing |
 
 ### What it guarantees
 
@@ -1446,7 +1450,7 @@ and designing one that cannot be abused is a bigger problem than this project ne
 ```bash
 cd blockchain
 npm run compile
-npm test                  # 57 tests on the in-process chain
+npm test                  # 63 tests on the in-process chain
 npm run balance           # deployer address + Sepolia balance
 npm run deploy:sepolia
 npm run verify:sepolia -- <address> <adminAddress>
@@ -1457,6 +1461,50 @@ npm run smoke             # live lock + release, prints Etherscan links
 > **Use a throwaway wallet.** `PRIVATE_KEY` in `blockchain/.env` belongs to a testnet-only
 > account. `hardhat.config.js` pins `chainId: 11155111`, so a mis-pointed RPC URL fails
 > before any transaction is sent rather than deploying somewhere expensive.
+
+---
+
+## Tests
+
+```bash
+npm test                        # everything: 222 tests
+npm run test:server             # 159 — node:test, no database required
+npm run test:chain              # 63  — Hardhat, in-process chain
+```
+
+Neither suite needs a database, an API key or a network. `NODE_ENV=test` forces fixture
+mode on, so a full run spends no Gemini quota and uploads nothing.
+
+| Area | What is covered |
+|---|---|
+| `app`, `errors` | the response envelope, error mapping, CORS refusal as a clean 403 |
+| `auth` | token signing and forgery, the role guard, self-assignable roles |
+| `report` | status lifecycle, upload filtering, the AI gate's shape |
+| `anomaly` | deviation scoring and its four bands, against the range's upper bound |
+| `gemini-fixture` | fixtures keyed by image hash, so tests are deterministic |
+| `project`, `bid` | publishing, the frozen estimate, bid rules, award transactionality |
+| `milestone` | schedule validation, exact-sum splitting, wei arithmetic in BigInt |
+| `email` | all 21 templates build, retry classification, failures stay non-fatal |
+| `public` | per-field redaction — the tests exist so a leak fails the build |
+| `desync` | the recovery path's schema and config, verification by event emitter |
+| `security` | who may read full milestone records; the JWT secret guard |
+| `InfraEscrow` | ownership, double-payment, sums, no-withdraw, reentrancy, batching |
+
+### What is *not* covered by the suite
+
+Stated plainly, because a test count is misleading without it.
+
+Flows that need a live database or a live chain — registration, login, a real upload, an
+actual on-chain release — are **not** unit tested. They were verified by running them, and
+the on-chain half is verifiable by anyone against Sepolia: project 3 of
+[`0x0e1aDF96…eF3F`](https://sepolia.etherscan.io/address/0x0e1aDF967b3f6dCE355C8509B816F33356abeF3F)
+holds a complete run — 0.004 ETH escrowed and three milestones released, each signed in
+MetaMask.
+
+What the suite pins instead is the logic that a refactor could silently break: redaction
+rules, money arithmetic, role and ownership checks, and the contract's guarantees. Two of
+the bugs found in live testing are now regression-tested here rather than merely fixed —
+verification by event emitter, and the participant guard on milestone reads.
 
 ---
 

@@ -47,7 +47,21 @@ export default {
     sepolia: {
       type: 'http',
       chainType: 'l1',
-      url: SEPOLIA_RPC_URL ?? '',
+      /**
+       * A placeholder when no RPC URL is configured, rather than an empty
+       * string.
+       *
+       * Hardhat validates every network entry at startup, including ones the
+       * current command will never touch, and rejects an empty URL outright.
+       * That made `npm test` — which runs entirely on the in-process chain and
+       * needs no RPC at all — fail on a fresh clone until the reader had signed
+       * up for an Alchemy key. The unit tests should run immediately after
+       * `npm install`.
+       *
+       * Any command that actually reaches Sepolia still fails loudly, because
+       * this host does not resolve.
+       */
+      url: SEPOLIA_RPC_URL?.trim() || 'https://sepolia.rpc.not-configured.invalid',
       accounts: deployerKey ? [deployerKey] : [],
       chainId: 11155111,
     },
