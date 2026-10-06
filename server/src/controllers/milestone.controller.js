@@ -73,6 +73,10 @@ export const prepareMilestoneRelease = asyncHandler(async (req, res) => {
   const result = await milestoneService.prepareMilestoneRelease(req.params.id, req.user, {
     overrideAiRejection: req.body?.overrideAiRejection === true,
     justification: req.body?.justification,
+    // The wallet that will sign, so the dry run is made by the same account
+    // as the real transaction. Advisory only — it is used for simulation, and
+    // the contract itself remains the authority on who may release funds.
+    walletAddress: req.body?.walletAddress,
   });
 
   return sendSuccess(res, {

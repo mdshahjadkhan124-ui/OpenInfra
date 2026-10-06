@@ -9,6 +9,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { Project } from '../src/models/Project.js';
 import { Milestone } from '../src/models/Milestone.js';
@@ -122,4 +123,48 @@ test('the server still holds no signing key', () => {
   assert.equal(chain.default.sendTransaction, undefined);
   assert.equal(chain.default.lockFunds, undefined, 'no direct server-signed lock');
   assert.equal(chain.default.releaseMilestone, undefined, 'no direct server-signed release');
+});
+
+// ---------------------------------------------------------------------------
+// The release simulation must declare a caller
+// ---------------------------------------------------------------------------
+
+test('simulateRelease accepts the signing wallet as `from`', () => {
+  /**
+   * `releaseMilestone` is owner-only. A simulation with no caller is made by
+   * the zero address, so it reverted with OwnableUnauthorizedAccount(0x0) and
+   * the error was reported to the real admin as "not the administrator" —
+   * blocking every release. The parameter is what lets the dry run be made by
+   * the account that will actually sign.
+   */
+  const source = readFileSync(
+    new URL('../src/services/chain.service.js', import.meta.url),
+    'utf8'
+  );
+  const signature = source.match(/export const simulateRelease = async \(\{([^}]*)\}/);
+  assert.ok(signature, 'simulateRelease should take a destructured options object');
+  assert.match(signature[1], /\bfrom\b/, 'it must accept a caller address');
+  assert.match(
+    source,
+    /const caller = from \?\? \(await getContract\(\)\.owner\(\)\)/,
+    'and fall back to the contract owner rather than simulating as nobody'
+  );
+});
+
+test('prepareMilestoneRelease forwards the wallet to the simulation', () => {
+  // The seam is only useful if the caller actually passes through it.
+  const source = readFileSync(
+    new URL('../src/services/milestone.service.js', import.meta.url),
+    'utf8'
+  );
+  const call = source.match(/chain\.simulateRelease\(\{[\s\S]*?\}\)/);
+  assert.ok(call, 'prepareMilestoneRelease should simulate before preparing');
+  assert.match(call[0], /from: options\.walletAddress/);
+});
+
+test('the approve validator accepts a wallet address', async () => {
+  const { approveMilestoneRules } = await import('../src/validators/milestone.validators.js');
+  // express-validator chains expose their field via .builder.fields
+  const fields = approveMilestoneRules.flatMap((rule) => rule.builder?.fields ?? []);
+  assert.ok(fields.includes('walletAddress'), 'walletAddress must be validated, not silently dropped');
 });

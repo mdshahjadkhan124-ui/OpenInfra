@@ -182,12 +182,29 @@ export const buildReleaseTransaction = ({ onChainProjectId, onChainIndex, eviden
 export const simulateRelease = async ({ onChainProjectId, onChainIndex, evidenceHash, from }) => {
   if (config.chain.mock) return { ok: true };
 
+  /**
+   * The simulation MUST declare a caller.
+   *
+   * `releaseMilestone` is `onlyOwner`. An `eth_call` with no `from` is made by
+   * the zero address, so the very first thing the contract checks fails, and
+   * every simulation reverted with `OwnableUnauthorizedAccount(0x0)` — which
+   * the error translator reported as "the connected wallet is not the
+   * administrator", naming a wallet that was never part of the call. The real
+   * admin was blocked from releasing funds and told to switch wallets.
+   *
+   * The signing wallet is passed in by the caller. When it is absent (a
+   * scripted call, say), fall back to the contract's own owner so the
+   * simulation still tests what it is meant to test — the milestone's state —
+   * rather than failing on an ownership check nobody asked for.
+   */
+  const caller = from ?? (await getContract().owner());
+
   try {
     await getContract().releaseMilestone.staticCall(
       onChainProjectId,
       onChainIndex,
       evidenceHash ?? ethers.ZeroHash,
-      { from }
+      { from: ethers.getAddress(caller) }
     );
     return { ok: true };
   } catch (err) {
@@ -573,10 +590,13 @@ const translateChainError = (err, action) => {
   const raw = err.shortMessage ?? err.message ?? '';
 
   let decodedName = null;
+  let decodedArgs = [];
   const data = err.data ?? err.info?.error?.data ?? err.error?.data;
   if (typeof data === 'string' && data.startsWith('0x') && data.length > 2) {
     try {
-      decodedName = getInterface().parseError(data)?.name ?? null;
+      const parsed = getInterface().parseError(data);
+      decodedName = parsed?.name ?? null;
+      decodedArgs = parsed?.args ? Array.from(parsed.args, String) : [];
     } catch {
       decodedName = null;
     }
@@ -607,8 +627,27 @@ const translateChainError = (err, action) => {
 
   if (decodedName && KNOWN[decodedName]) {
     const [status, message] = KNOWN[decodedName];
-    logger.error(`Chain error (${decodedName}) while trying to ${action}`);
-    return new ApiError(status, message, { code: decodedName, cause: err });
+
+    /**
+     * Name the address the contract actually rejected.
+     *
+     * A bare "the connected wallet is not the administrator" once sent the
+     * genuine admin hunting for a wallet problem that did not exist: the
+     * rejected caller was the zero address, because the simulation declared no
+     * caller at all. Reporting the address makes that mistake self-evident.
+     */
+    const rejected = decodedName === 'OwnableUnauthorizedAccount' ? decodedArgs[0] : null;
+    const detail =
+      rejected === ethers.ZeroAddress
+        ? ' (the request reached the contract with no caller address — this is a server fault, not a wallet problem)'
+        : rejected
+          ? ` (rejected ${rejected})`
+          : '';
+
+    logger.error(
+      `Chain error (${decodedName}${rejected ? `: ${rejected}` : ''}) while trying to ${action}`
+    );
+    return new ApiError(status, `${message}${detail}`, { code: decodedName, cause: err });
   }
 
   if (/could not detect network|ECONNREFUSED|ENOTFOUND|timeout|SERVER_ERROR/i.test(raw)) {

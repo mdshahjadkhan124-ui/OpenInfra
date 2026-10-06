@@ -48,6 +48,14 @@ export const approveMilestoneRules = [
     .trim()
     .isLength({ min: 20, max: 1000 })
     .withMessage('Justification must be between 20 and 1000 characters.'),
+  // The wallet that will sign, used to simulate the release as the real
+  // caller. Validated as an address so a malformed value fails here with a
+  // clear message rather than inside ethers.
+  body('walletAddress')
+    .optional({ values: 'falsy' })
+    .trim()
+    .isEthereumAddress()
+    .withMessage('walletAddress must be a valid Ethereum address.'),
 ];
 
 export const rejectMilestoneRules = [

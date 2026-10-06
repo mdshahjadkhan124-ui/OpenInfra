@@ -308,9 +308,14 @@ const ReviewModal = ({ milestone: m, contract, onClose, onDone }) => {
    */
   const release = async () => {
     setError(null);
+    /**
+     * The connected wallet goes with the request so the server simulates the
+     * release as the account that will actually sign it. Without it the dry
+     * run was made by no one, and an owner-only contract naturally refused.
+     */
     const overridePayload = needsOverride
-      ? { overrideAiRejection: true, justification }
-      : {};
+      ? { overrideAiRejection: true, justification, walletAddress: address }
+      : { walletAddress: address };
 
     let prepared;
     try {

@@ -584,10 +584,20 @@ const prepareApproval = async (milestoneId, admin, { overrideAiRejection = false
 export const prepareMilestoneRelease = async (milestoneId, admin, options = {}) => {
   const { milestone, project, evidenceHash } = await prepareApproval(milestoneId, admin, options);
 
+  /**
+   * Simulate as the wallet that is about to sign.
+   *
+   * `releaseMilestone` is owner-only, so a simulation with no caller is made
+   * by the zero address and always fails the ownership check — which is
+   * exactly what blocked the live release. Passing the connected wallet makes
+   * the dry run match the transaction MetaMask will actually broadcast, so a
+   * genuinely wrong wallet is still caught here, before it costs gas.
+   */
   await chain.simulateRelease({
     onChainProjectId: project.onChainProjectId,
     onChainIndex: milestone.onChainIndex,
     evidenceHash,
+    from: options.walletAddress,
   });
 
   const transaction = chain.buildReleaseTransaction({
