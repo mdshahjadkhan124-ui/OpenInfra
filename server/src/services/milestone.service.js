@@ -412,13 +412,6 @@ export const submitProgress = async (milestoneId, contractor, { file, note } = {
     );
   }
   if (milestone.status === MILESTONE_STATUS.PAID) {
-    // A repeat confirmation of the same payment is a retry, not an error.
-    if (
-      options.transactionHash &&
-      milestone.transactionHash?.toLowerCase() === String(options.transactionHash).toLowerCase()
-    ) {
-      return { milestone, project, alreadyPaid: true };
-    }
     throw new ConflictError('This milestone has already been paid.');
   }
   if (milestone.status === MILESTONE_STATUS.SUBMITTED) {
@@ -654,6 +647,42 @@ export const prepareMilestoneRelease = async (milestoneId, admin, options = {}) 
  * a different milestone, is rejected.
  */
 export const confirmMilestoneRelease = async (milestoneId, admin, { transactionHash, ...options } = {}) => {
+  /**
+   * A repeat confirmation of a payment already recorded is a RETRY, not an
+   * error — and this check has to come before `prepareApproval`, which refuses
+   * a paid milestone outright.
+   *
+   * The real sequence this protects: the admin signs, MetaMask broadcasts, and
+   * the confirm request then times out or the connection drops. The browser
+   * retries with the same hash. Answering 409 "already paid" tells the official
+   * their payment failed when it demonstrably succeeded, which is the exact
+   * confusion the rest of the recovery work exists to prevent.
+   *
+   * A *different* hash for an already-paid milestone is still refused: that is
+   * either a double-payment attempt or a mix-up, and neither should be recorded.
+   */
+  const existing = await loadMilestone(milestoneId);
+  if (existing.status === MILESTONE_STATUS.PAID) {
+    const sameHash =
+      transactionHash &&
+      existing.transactionHash?.toLowerCase() === String(transactionHash).toLowerCase();
+
+    if (sameHash) {
+      const settled = existing.project;
+      logger.info(
+        `Milestone ${existing.number} of project ${settled.id} re-confirmed with the same hash; treating as a retry.`
+      );
+      return {
+        milestone: existing,
+        project: settled,
+        receipt: { transactionHash: existing.transactionHash, alreadyRecorded: true },
+        explorerUrl: chain.explorerTxUrl(existing.transactionHash),
+        projectCompleted: settled.status === PROJECT_STATUS.COMPLETED,
+      };
+    }
+    throw new ConflictError('This milestone has already been paid.');
+  }
+
   const { milestone, project, isOverridableAiRejection, evidenceHash } = await prepareApproval(
     milestoneId,
     admin,

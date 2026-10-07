@@ -1467,9 +1467,10 @@ npm run smoke             # live lock + release, prints Etherscan links
 ## Tests
 
 ```bash
-npm test                        # everything: 222 tests
-npm run test:server             # 159 — node:test, no database required
+npm test                        # unit + contract: 224 tests
+npm run test:server             # 161 — node:test, no database required
 npm run test:chain              # 63  — Hardhat, in-process chain
+npm run test:e2e                # 169 checks against the real API (needs MONGO_URI)
 ```
 
 Neither suite needs a database, an API key or a network. `NODE_ENV=test` forces fixture
@@ -1490,21 +1491,76 @@ mode on, so a full run spends no Gemini quota and uploads nothing.
 | `security` | who may read full milestone records; the JWT secret guard |
 | `InfraEscrow` | ownership, double-payment, sums, no-withdraw, reentrancy, batching |
 
-### What is *not* covered by the suite
+### End-to-end
+
+```bash
+npm run test:e2e                # 169 checks against the real HTTP API
+```
+
+Separate from `npm test` on purpose: this one starts the actual Express app and
+drives it over HTTP against a real MongoDB, which is the only way to exercise
+middleware order, role guards, multipart uploads, validation and the service layer
+*together*. It uses its own database (`openinfra_e2e`) and its own port, and drops
+the database when it finishes, so it never touches development data.
+
+It needs `MONGO_URI` and nothing else. Fixture mode is forced on, so no Gemini
+quota is spent, nothing is uploaded, no email is sent and no transaction is
+broadcast.
+
+One complete lifecycle, plus the negative paths:
+
+| Section | What it drives |
+|---|---|
+| 1 | citizen registers; report passes the AI gate with the expected range; admin role refused at registration |
+| 2 | admin reviews, approves, publishes; the estimate is frozen onto the project |
+| 3 | a reasonable bid and a 56%-over bid — the second flagged at the 19,200 threshold |
+| 4 | award with a 30/45/25 schedule; a schedule not summing to 100% refused; escrow funded |
+| 5 | three rounds of submit → AI verify → prepare → confirm → paid, then project completed |
+| 6 | the public dashboard, redaction, payment proofs, verify-against-chain |
+| 7 | an irrelevant photo rejected, with no cost estimate and a rejection email |
+| 8 | half-done work rejected by the AI, then a justified admin override, surfaced publicly |
+| 9 | every admin route refused to a citizen; forged tokens; cross-tenant reads as 404 |
+| 10 | prompt injection in a description; XSS; NoSQL operators; malformed ids and hashes |
+
+Emails are asserted by reading the preview directory fixture mode writes to. Note
+the event names are dotted (`report.received`, not `reportReceived`) — asserting on
+the camelCase function names silently matches nothing.
+
+#### What it chooses not to claim
+
+Five checks are reported as **skipped**, with the reason, rather than quietly
+omitted:
+
+- **wrong-wallet release** — `simulateRelease` short-circuits in fixture mode, so
+  this cannot be exercised here. Verified against live Sepolia: the owner passes,
+  a random address reverts `OwnableUnauthorizedAccount`.
+- **a real MetaMask signature** — needs a browser and a funded key.
+- **the Google OAuth round trip** — needs Google to redirect back.
+- **real Gemini output** — the fixtures are canned by design.
+- **real email delivery** — preview mode writes to disk instead of sending.
+
+### What is *not* covered
 
 Stated plainly, because a test count is misleading without it.
 
-Flows that need a live database or a live chain — registration, login, a real upload, an
-actual on-chain release — are **not** unit tested. They were verified by running them, and
-the on-chain half is verifiable by anyone against Sepolia: project 3 of
+The three layers divide like this. The **unit suite** pins logic a refactor could silently
+break — redaction rules, money arithmetic, role and ownership checks — and needs nothing
+external. The **contract suite** pins the escrow's guarantees on a real EVM. The
+**end-to-end run** drives registration, login, uploads, bidding, award, escrow and the full
+milestone cycle through the real HTTP API against a real database.
+
+What none of them touch is anything requiring a browser, a funded key or a live third party:
+a real MetaMask signature, the Google OAuth redirect, genuine Gemini output, and actual email
+delivery. Those were verified by running them during the phases that built them, and the
+on-chain half is verifiable by anyone against Sepolia: project 3 of
 [`0x0e1aDF96…eF3F`](https://sepolia.etherscan.io/address/0x0e1aDF967b3f6dCE355C8509B816F33356abeF3F)
 holds a complete run — 0.004 ETH escrowed and three milestones released, each signed in
-MetaMask.
+MetaMask. There is also no browser-level UI test: the frontend is checked by building it and
+using it, not by assertion.
 
-What the suite pins instead is the logic that a refactor could silently break: redaction
-rules, money arithmetic, role and ownership checks, and the contract's guarantees. Two of
-the bugs found in live testing are now regression-tested here rather than merely fixed —
-verification by event emitter, and the participant guard on milestone reads.
+Three bugs found by testing rather than by reading are now regression-tested rather than
+merely fixed: verification by event emitter, the participant guard on milestone reads, and
+confirm-retry idempotency on a milestone payment.
 
 ---
 

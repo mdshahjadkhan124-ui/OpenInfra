@@ -230,3 +230,66 @@ test('a project is only completed when every milestone is paid', () => {
   const gates = source.match(/const allPaid =[\s\S]{0,160}?every\(\(m\) => m\.status === MILESTONE_STATUS\.PAID\)/g);
   assert.ok(gates && gates.length >= 2, 'release and sync should each require all milestones paid');
 });
+
+// ---------------------------------------------------------------------------
+// Confirming a payment twice is a retry, not a failure
+// ---------------------------------------------------------------------------
+
+test('confirmMilestoneRelease checks for an existing payment before prepareApproval', () => {
+  /**
+   * Found by the end-to-end run, and it was live: re-confirming a payment
+   * already recorded answered 409 "already paid".
+   *
+   * The sequence that hits it — admin signs, MetaMask broadcasts, the confirm
+   * request times out, the browser retries with the same hash — is exactly the
+   * one the recovery work exists to survive. Telling the official their payment
+   * failed when it succeeded is the confusion this whole area is meant to end.
+   *
+   * The guard has to come BEFORE `prepareApproval`, which refuses a paid
+   * milestone outright. An idempotency check placed after it can never run —
+   * which is what had happened: the branch had been written into the progress
+   * submission instead, where there is no transaction hash to compare.
+   */
+  const source = readFileSync(
+    new URL('../src/services/milestone.service.js', import.meta.url),
+    'utf8'
+  );
+
+  const fn = source.slice(
+    source.indexOf('export const confirmMilestoneRelease'),
+    source.indexOf('export const rejectMilestone')
+  );
+  assert.ok(fn.length > 0, 'confirmMilestoneRelease should exist');
+
+  const idempotentAt = fn.indexOf('alreadyRecorded');
+  const prepareAt = fn.indexOf('await prepareApproval');
+  assert.ok(idempotentAt > -1, 'it must short-circuit a payment already recorded');
+  assert.ok(prepareAt > -1, 'it should still run prepareApproval for a new payment');
+  assert.ok(
+    idempotentAt < prepareAt,
+    'the idempotency check must come first, or prepareApproval rejects the retry and it never runs'
+  );
+
+  // And a different hash for a paid milestone must still be refused.
+  assert.match(fn, /throw new ConflictError\('This milestone has already been paid\.'\)/);
+});
+
+test('the progress submission carries no transaction-hash idempotency', () => {
+  // That branch was misplaced there, where `transactionHash` is never supplied,
+  // so it was dead code pretending to be a safeguard.
+  const source = readFileSync(
+    new URL('../src/services/milestone.service.js', import.meta.url),
+    'utf8'
+  );
+  const fn = source.slice(
+    source.indexOf('export const submitProgress'),
+    source.indexOf('const prepareApproval')
+  );
+  if (fn.length > 0) {
+    assert.doesNotMatch(
+      fn,
+      /options\.transactionHash/,
+      'a progress submission has no transaction hash to be idempotent about'
+    );
+  }
+});

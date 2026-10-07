@@ -15,7 +15,8 @@
     "start": "node src/server.js",
     "test": "node --import ./test/setup.js --test \"test/**/*.test.js\"",
     "create-admin": "node scripts/createAdmin.js",
-    "sync-abi": "node scripts/syncAbi.js"
+    "sync-abi": "node scripts/syncAbi.js",
+    "test:e2e": "node test/e2e/lifecycle.e2e.js"
   },
   "dependencies": {
     "@google/genai": "^2.27.0",
