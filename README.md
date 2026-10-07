@@ -2022,6 +2022,19 @@ precision is lost to JSON number parsing.
 
 ---
 
+## Further reading
+
+In [`docs/`](docs/):
+
+- [`project-writeup.md`](docs/project-writeup.md) — the problem, the design, the
+  architecture, and what the production bugs taught me. Includes what this
+  project deliberately is *not*.
+- [`demo-script.md`](docs/demo-script.md) — a two-minute walkthrough, shot by shot.
+- [`resume-bullets.md`](docs/resume-bullets.md) — condensed for a CV, with the
+  answers to the questions each bullet invites.
+
+---
+
 ## Credits
 
 Designed and built by **MD SHAHJAD KHAN**.
