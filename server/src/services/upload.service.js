@@ -220,10 +220,27 @@ export const uploadImage = async (buffer, { folder, context } = {}) => {
 };
 
 /**
- * Delete an asset.
+ * Delete an asset, and purge it from the CDN.
  *
- * Used to clean up an orphaned upload when a later step in the same request
- * fails. Never throws: a failed cleanup must not mask the original error.
+ * Two callers, with different stakes. Cleaning up an orphaned upload after a
+ * later step fails is housekeeping. But `report.service.deleteReport` also
+ * calls this when a **citizen deletes their own report**, and there the promise
+ * made to them is that the photo stops being available.
+ *
+ * `invalidate: true` is what keeps that promise. Without it, `destroy` removes
+ * the stored asset while Cloudinary's CDN carries on serving the delivery URL —
+ * which is sent with `immutable, max-age=2592000`, so a withdrawn photo stays
+ * publicly fetchable by anyone holding the link for up to **thirty days**.
+ * Delivery URLs carry no authentication, and these are street photographs that
+ * can contain identifying detail, so that gap is the difference between
+ * deleting a record and deleting a photograph.
+ *
+ * Invalidation is **not instant**: Cloudinary propagates the purge across its
+ * edges over a few minutes, so the URL can still serve the cached copy briefly
+ * after this resolves. That is a smaller window than thirty days, not zero, and
+ * there is no API that makes it zero.
+ *
+ * Never throws: a failed cleanup must not mask the original error.
  */
 export const deleteImage = async (publicId) => {
   if (!publicId || !config.cloudinary.ready) return false;
@@ -232,8 +249,8 @@ export const deleteImage = async (publicId) => {
     return true;
   }
   try {
-    await getCloudinary().uploader.destroy(publicId);
-    logger.debug(`Deleted orphaned Cloudinary asset: ${publicId}`);
+    await getCloudinary().uploader.destroy(publicId, { invalidate: true });
+    logger.debug(`Deleted and invalidated Cloudinary asset: ${publicId}`);
     return true;
   } catch (err) {
     logger.warn(`Could not delete Cloudinary asset ${publicId}: ${err.message}`);

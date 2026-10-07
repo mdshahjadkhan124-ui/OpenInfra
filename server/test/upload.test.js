@@ -12,6 +12,8 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 
 import { translateUploadFailure } from '../src/services/upload.service.js';
 
@@ -135,4 +137,76 @@ test('the four outcomes have distinct codes', () => {
     )
   );
   assert.equal(codes.size, 4, 'a client cannot distinguish outcomes that share a code');
+});
+
+// ---------------------------------------------------------------------------
+// Deletion must purge the CDN, not just the stored asset
+// ---------------------------------------------------------------------------
+
+/**
+ * Run `deleteImage` for real, with Cloudinary's `destroy` intercepted.
+ *
+ * In a child process because fixture mode is forced on under NODE_ENV=test, so
+ * `deleteImage` would short-circuit and never reach the SDK — the assertion
+ * would pass without testing anything. The child runs as `development` with
+ * uploads un-mocked, and patches the `cloudinary` singleton before the service
+ * is imported, so nothing touches the network.
+ */
+const deleteImageProbe = () => {
+  const serviceUrl = new URL('../src/services/upload.service.js', import.meta.url).href;
+  const script = `
+    import { v2 as cloudinary } from 'cloudinary';
+    const calls = [];
+    cloudinary.uploader.destroy = async (publicId, options) => {
+      calls.push({ publicId, options: options ?? null });
+      return { result: 'ok' };
+    };
+    const { deleteImage } = await import(${JSON.stringify(serviceUrl)});
+    const { config } = await import(${JSON.stringify(new URL('../src/config/env.js', import.meta.url).href)});
+    const returned = await deleteImage('openinfra/reports/withdrawn-photo');
+    process.stdout.write(JSON.stringify({ returned, calls, mock: config.cloudinary.mock }));
+  `;
+
+  const out = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+    env: {
+      ...process.env,
+      NODE_ENV: 'development', // `test` forces fixture mode, which skips the SDK
+      MOCK_EXTERNAL: 'false',
+      MOCK_UPLOADS: 'false',
+      LOG_LEVEL: 'silent',
+    },
+    encoding: 'utf8',
+  });
+  return JSON.parse(out.slice(out.indexOf('{')));
+};
+
+test('deleting an image invalidates the CDN copy, not just the stored asset', () => {
+  /**
+   * `report.service.deleteReport` calls this when a citizen deletes their own
+   * report. Without `invalidate: true`, Cloudinary drops the stored asset but
+   * keeps serving the delivery URL — sent as `immutable, max-age=2592000` — so
+   * a withdrawn photo stays publicly fetchable for up to thirty days by anyone
+   * holding the link, with no authentication on it.
+   */
+  const { returned, calls, mock } = deleteImageProbe();
+
+  assert.equal(mock, false, 'the probe must exercise the real path, not fixture mode');
+  assert.equal(calls.length, 1, 'destroy should have been called exactly once');
+  assert.equal(calls[0].publicId, 'openinfra/reports/withdrawn-photo');
+  assert.ok(calls[0].options, 'destroy must be called with options, not bare');
+  assert.equal(calls[0].options.invalidate, true, 'the CDN copy must be purged too');
+  assert.equal(returned, true);
+});
+
+test('a citizen deleting their report is what triggers that invalidation', () => {
+  // The privacy promise lives in report.service, so the link between the two is
+  // worth pinning: a refactor that stopped deleting the image would leave the
+  // photo served indefinitely with nothing failing.
+  const source = readFileSync(new URL('../src/services/report.service.js', import.meta.url), 'utf8');
+  const fn = source.slice(source.indexOf('export const deleteReport'));
+  assert.match(
+    fn,
+    /await deleteImage\(report\.imagePublicId\)/,
+    'deleteReport must remove the stored photograph, not only the record'
+  );
 });
