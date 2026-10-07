@@ -954,6 +954,11 @@ export const syncProjectFromChain = async (projectId) => {
         m.transactionHash = tx.transactionHash;
         m.blockNumber = tx.blockNumber;
         if (tx.evidenceHash) m.evidenceHash = tx.evidenceHash;
+        // The wallet that signed the release, so a recovered milestone carries
+        // the same proof of who approved it as one confirmed normally. Only set
+        // when recovered — never blanked, since an existing value came from the
+        // receipt at confirm time and is no less trustworthy.
+        if (tx.approvedByWallet) m.approvedByWallet = tx.approvedByWallet;
       } else if (m.pendingTxHash) {
         m.transactionHash = m.pendingTxHash;
       }
@@ -967,6 +972,49 @@ export const syncProjectFromChain = async (projectId) => {
           ? `released on-chain in ${tx.transactionHash}`
           : 'released on-chain (transaction hash unavailable)',
       });
+    } else if (chainState.released && m.status === MILESTONE_STATUS.PAID) {
+      /**
+       * Already paid here and on-chain, but the record may still be missing
+       * pieces — and the branch above only runs for a milestone whose status is
+       * changing, so it would never fill them in.
+       *
+       * This is what repairs a milestone reconciled before the chain scan knew
+       * how to read the signer: it is paid, so nothing above touches it, yet
+       * `approvedByWallet` stays null and the public record names nobody as
+       * having approved the payment. Backfilled here, and only ever when the
+       * field is empty — a value already recorded came from the receipt at
+       * confirm time and is never overwritten.
+       */
+      const tx = releaseTxs.get(m.onChainIndex);
+      const backfilled = [];
+
+      if (tx?.approvedByWallet && !m.approvedByWallet) {
+        m.approvedByWallet = tx.approvedByWallet;
+        backfilled.push('approvedByWallet');
+      }
+      if (tx?.evidenceHash && !m.evidenceHash) {
+        m.evidenceHash = tx.evidenceHash;
+        backfilled.push('evidenceHash');
+      }
+      if (tx?.transactionHash && !m.transactionHash) {
+        m.transactionHash = tx.transactionHash;
+        backfilled.push('transactionHash');
+      }
+      if (tx?.blockNumber && !m.blockNumber) {
+        m.blockNumber = tx.blockNumber;
+        backfilled.push('blockNumber');
+      }
+
+      if (backfilled.length > 0) {
+        await m.save();
+        corrections.push({
+          milestone: m.number,
+          field: backfilled.join(', '),
+          from: null,
+          to: 'recovered from the release transaction',
+          reason: 'already paid, but the payment record was incomplete',
+        });
+      }
     }
 
     // A milestone our database thinks is paid but the chain says is not is the

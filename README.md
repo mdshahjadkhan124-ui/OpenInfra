@@ -326,7 +326,7 @@ CHAIN_ID=11155111
 
 ```ini
 # client/.env
-VITE_CONTRACT_ADDRESS=0x0e1aDF967b3f6dCE355C8509B816F33356abeF3F
+# Hex, not decimal — the wallet APIs reject a decimal chain id.
 VITE_CHAIN_ID=0xaa36a7
 ```
 
@@ -411,8 +411,8 @@ relative path resolves to `index.html` — so every API call would come back as
 a page of HTML, and the app would fail with JSON parse errors that point
 nowhere near the real cause.
 
-Also set `VITE_GOOGLE_CLIENT_ID`, `VITE_CONTRACT_ADDRESS`, `VITE_CHAIN_ID` and
-`VITE_ETHERSCAN_BASE_URL`; every `VITE_*` value is compiled into the bundle and
+Also set `VITE_GOOGLE_CLIENT_ID`, `VITE_CHAIN_ID` (**hex**, e.g. `0xaa36a7` — the
+wallet APIs reject a decimal chain id) and `VITE_ETHERSCAN_BASE_URL`; every `VITE_*` value is compiled into the bundle and
 is therefore public by definition, so none of them is a secret.
 
 Two more things have to agree with the deployed origin, and neither lives in
@@ -1525,8 +1525,9 @@ npm run smoke             # live lock + release, prints Etherscan links
 ## Tests
 
 ```bash
-npm test                        # unit + contract: 225 tests
-npm run test:server             # 162 — node:test, no database required
+npm test                        # everything offline: 251 tests
+npm run test:server             # 178 — node:test, no database required
+npm run test:client             # 10  — chain-id notation, no framework
 npm run test:chain              # 63  — Hardhat, in-process chain
 npm run test:e2e                # 169 checks against the real API (needs MONGO_URI)
 ```

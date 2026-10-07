@@ -293,3 +293,97 @@ test('the progress submission carries no transaction-hash idempotency', () => {
     );
   }
 });
+
+// ---------------------------------------------------------------------------
+// A recovered milestone carries the same proof as a confirmed one
+// ---------------------------------------------------------------------------
+
+test('the release-log scan reports who signed the transaction', () => {
+  /**
+   * Noticed on the live public record: milestone 1 of project 3 — the one
+   * recovered by reconciliation after the batched confirm failed — showed
+   * `approvedByWallet: null` while its neighbours named the admin wallet.
+   *
+   * `MilestoneReleased` carries no approver argument, so the signer has to come
+   * from the transaction itself. Source-level because the alternative needs a
+   * funded contract on a live network; the behaviour was verified against
+   * Sepolia, which is also what repaired the real record.
+   */
+  const source = readFileSync(
+    new URL('../src/services/chain.service.js', import.meta.url),
+    'utf8'
+  );
+  const fn = source.slice(
+    source.indexOf('export const findMilestoneReleaseTransactions'),
+    source.indexOf('/** The on-chain project id for a platform project')
+  );
+  assert.ok(fn.length > 0, 'findMilestoneReleaseTransactions should exist');
+
+  assert.match(fn, /getTransaction\(log\.transactionHash\)/, 'it must read the transaction');
+  assert.match(fn, /approvedByWallet/, 'and return the signer');
+  // A failed lookup must degrade to null rather than abort the recovery, which
+  // would leave the milestone unreconciled over a missing nicety.
+  assert.match(fn, /approvedByWallet = null/);
+  assert.match(fn, /catch \(err\)/);
+});
+
+test('sync records the approving wallet, and never blanks an existing one', () => {
+  // An existing value came from the receipt at confirm time and is no less
+  // trustworthy, so reconciliation must not overwrite it with null.
+  const source = readFileSync(
+    new URL('../src/services/milestone.service.js', import.meta.url),
+    'utf8'
+  );
+  const sync = source.slice(source.indexOf('export const syncProjectFromChain'));
+
+  assert.match(
+    sync,
+    /if \(tx\.approvedByWallet\) m\.approvedByWallet = tx\.approvedByWallet;/,
+    'assigned only when recovered'
+  );
+  assert.doesNotMatch(
+    sync,
+    /m\.approvedByWallet = tx\.approvedByWallet \?\? null/,
+    'must not clear a wallet already recorded'
+  );
+});
+
+test('sync backfills an incomplete payment record on an already-paid milestone', () => {
+  /**
+   * The gap the first version of this fix left. Reconciliation only touched a
+   * milestone whose status was *changing*, so a milestone already marked paid —
+   * exactly the case of one recovered before the scan could read the signer —
+   * would keep `approvedByWallet: null` forever, and the public record would
+   * name nobody as having approved that payment.
+   *
+   * Backfill only ever fills an empty field, never overwrites one.
+   */
+  const source = readFileSync(
+    new URL('../src/services/milestone.service.js', import.meta.url),
+    'utf8'
+  );
+  const sync = source.slice(source.indexOf('export const syncProjectFromChain'));
+
+  assert.match(
+    sync,
+    /else if \(chainState\.released && m\.status === MILESTONE_STATUS\.PAID\)/,
+    'there must be a branch for a milestone already paid on both sides'
+  );
+
+  const branch = sync.slice(
+    sync.indexOf('else if (chainState.released && m.status === MILESTONE_STATUS.PAID)')
+  );
+  // Every backfill is guarded on the field being empty.
+  // Plain substring checks rather than a built regex: escaping `?.` inside a
+  // template literal is easy to get wrong, and a silently over-permissive
+  // pattern would make this test pass while asserting nothing.
+  for (const field of ['approvedByWallet', 'evidenceHash', 'transactionHash', 'blockNumber']) {
+    assert.ok(
+      branch.includes(`tx?.${field} && !m.${field}`),
+      `${field} must only be filled when missing`
+    );
+  }
+  // And it saves only when something actually changed, so a no-op sync stays a
+  // no-op rather than reporting phantom corrections.
+  assert.match(branch, /if \(backfilled\.length > 0\)/);
+});

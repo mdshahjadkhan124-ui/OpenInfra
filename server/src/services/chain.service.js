@@ -496,12 +496,42 @@ export const findMilestoneReleaseTransactions = async (onChainProjectId) => {
         log.topics
       ).slice(3);
 
+      /**
+       * Who approved the payment.
+       *
+       * `MilestoneReleased` carries no approver argument — the contract only
+       * emits the project, the index, the contractor, the amount and the
+       * evidence hash — so the signer has to come from the transaction itself.
+       * Without it, a milestone recovered by reconciliation shows no approving
+       * wallet on the public record while its neighbours do, which is a hole in
+       * exactly the accountability this platform exists to provide.
+       *
+       * This is the same value `confirmTransaction` records on the happy path
+       * (`receipt.from`), so a recovered milestone ends up indistinguishable
+       * from one confirmed normally. For a batched or delegated transaction it
+       * is the EOA that signed, not the intermediary contract, which is the
+       * accountable party either way.
+       *
+       * One extra call per recovered milestone, and only during recovery. A
+       * failure here must not abort the reconciliation, so it degrades to null.
+       */
+      let approvedByWallet = null;
+      try {
+        const tx = await getProvider().getTransaction(log.transactionHash);
+        approvedByWallet = tx?.from ? ethers.getAddress(tx.from) : null;
+      } catch (err) {
+        logger.warn(
+          `Could not read the sender of ${log.transactionHash}: ${err.shortMessage ?? err.message}`
+        );
+      }
+
       byIndex.set(index, {
         transactionHash: log.transactionHash,
         blockNumber: log.blockNumber,
         contractor: ethers.getAddress(`0x${log.topics[3].slice(26)}`),
         amountWei: amount?.toString() ?? null,
         evidenceHash: evidenceHash ?? null,
+        approvedByWallet,
       });
     }
   } catch (err) {

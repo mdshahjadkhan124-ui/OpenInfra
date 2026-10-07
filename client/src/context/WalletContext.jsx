@@ -10,7 +10,7 @@
  * their own key. `sendPrepared` is the single function that does it.
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { SEPOLIA_CHAIN_ID } from '../lib/constants.js';
+import { SEPOLIA_CHAIN_ID, sameChain } from '../lib/constants.js';
 
 const WalletContext = createContext(null);
 
@@ -58,7 +58,9 @@ export const WalletProvider = ({ children }) => {
   const [error, setError] = useState(null);
 
   const available = hasMetaMask();
-  const onSepolia = chainId?.toLowerCase() === SEPOLIA_CHAIN_ID.toLowerCase();
+  // Compared through sameChain, so a chain id configured in decimal still
+  // matches the hex form the wallet reports.
+  const onSepolia = sameChain(chainId, SEPOLIA_CHAIN_ID);
 
   /** Read the current account without prompting — for silent reconnection. */
   const readAccounts = useCallback(async () => {
@@ -207,7 +209,7 @@ export const WalletProvider = ({ children }) => {
       // Refuse to sign on the wrong network rather than letting the user
       // broadcast a transaction to a chain where the contract does not exist.
       const currentChain = await readChain();
-      if (currentChain?.toLowerCase() !== SEPOLIA_CHAIN_ID.toLowerCase()) {
+      if (!sameChain(currentChain, SEPOLIA_CHAIN_ID)) {
         throw new Error('Your wallet is on the wrong network. Switch to Sepolia and try again.');
       }
 

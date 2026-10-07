@@ -1,3 +1,5 @@
+import { toHexChainId, sameChain } from './chain.js';
+
 /** Shared vocabulary, kept in one place so badges and filters cannot drift. */
 
 export const ROLES = Object.freeze({
@@ -101,8 +103,15 @@ export const SEVERITY_TONE = Object.freeze({
   critical: 'red',
 });
 
-export const SEPOLIA_CHAIN_ID = import.meta.env.VITE_CHAIN_ID || '0xaa36a7';
+/**
+ * Always hex, whatever notation the environment supplied — this is the value
+ * handed to `wallet_switchEthereumChain` and `wallet_addEthereumChain`, both of
+ * which reject a decimal string. See lib/chain.js for why this matters.
+ */
+export const SEPOLIA_CHAIN_ID = toHexChainId(import.meta.env.VITE_CHAIN_ID) ?? '0xaa36a7';
+
+export { toHexChainId, sameChain };
+
 export const ETHERSCAN_BASE =
   import.meta.env.VITE_ETHERSCAN_BASE_URL || 'https://sepolia.etherscan.io';
-export const CONTRACT_ADDRESS = import.meta.env.VITE_CONTRACT_ADDRESS || '';
 export const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
