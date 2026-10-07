@@ -366,6 +366,64 @@ funds. Import it into MetaMask and use it as your admin wallet.
 
 ---
 
+## Deploying the frontend
+
+The client is a single-page app, so the host has to serve `index.html` for paths
+that are not real files — otherwise the server looks for a directory called
+`auth/callback`, finds nothing, and returns its own 404. That breaks two things
+that matter: refreshing any route, and the Google OAuth return, which lands on
+`/auth/callback#token=…` as a fresh navigation rather than a client-side one.
+
+`client/vercel.json` is what fixes it:
+
+```json
+{
+  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+}
+```
+
+A catch-all looks alarming but is safe here, because Vercel resolves a request
+in this order:
+
+```
+redirects  ->  filesystem  ->  rewrites  ->  404
+```
+
+The filesystem is checked **before** rewrites, so `/assets/index-a1b2c3.js` is
+served as the real file and only unmatched paths ever reach the rewrite. The
+build also emits absolute asset references (`/assets/…`, not `./assets/…`), so
+`index.html` loads correctly even when served for a deep route like
+`/transparency/projects/:id`.
+
+The file deliberately sets **only** `rewrites`. Adding `buildCommand`,
+`outputDirectory` or `framework` here would override the dashboard settings,
+which matter in this repo: the Vercel root directory is `client`, while
+`npm install` has to run at the repo root for the workspaces to resolve.
+
+### One environment variable that must be set
+
+`VITE_API_URL` has to be set in the Vercel project, to the **absolute** URL of
+the deployed API (`https://your-api.example.com/api`).
+
+It is not optional in production. The client falls back to a relative `/api`
+when the variable is missing, and with the catch-all rewrite in place that
+relative path resolves to `index.html` — so every API call would come back as
+a page of HTML, and the app would fail with JSON parse errors that point
+nowhere near the real cause.
+
+Also set `VITE_GOOGLE_CLIENT_ID`, `VITE_CONTRACT_ADDRESS`, `VITE_CHAIN_ID` and
+`VITE_ETHERSCAN_BASE_URL`; every `VITE_*` value is compiled into the bundle and
+is therefore public by definition, so none of them is a secret.
+
+Two more things have to agree with the deployed origin, and neither lives in
+this repo:
+
+- the API's `CLIENT_URL`, which CORS and the OAuth redirect are built from
+- the Google OAuth **authorised redirect URI**, which must list the deployed
+  callback alongside the localhost one
+
+---
+
 ## API reference
 
 Every response uses one envelope, so the frontend never has to guess a payload shape.
