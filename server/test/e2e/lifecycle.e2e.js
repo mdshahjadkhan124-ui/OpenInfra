@@ -892,6 +892,18 @@ const main = async () => {
   process.stdout.write('\x1b[1mOpenInfra end-to-end — real API, fixture mode\x1b[0m\n');
   let crashed = null;
   try {
+    /**
+     * Check the fixtures before anything else.
+     *
+     * Every verdict in this run is chosen by picking an image, and an
+     * unrecognised hash falls back to a PASSING response. A re-saved PNG would
+     * therefore not fail the run — it would make the negative sections pass for
+     * the wrong reason, which is worse than a red build. Abort instead.
+     */
+    const { assertFixturesIntact } = await import('../fixtures/verify.js');
+    const checked = assertFixturesIntact();
+    process.stdout.write(`\x1b[2m  ${checked} fixture images verified against hashes.json\x1b[0m\n`);
+
     await startServer();
     await run();
   } catch (err) {

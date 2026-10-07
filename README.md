@@ -1467,8 +1467,8 @@ npm run smoke             # live lock + release, prints Etherscan links
 ## Tests
 
 ```bash
-npm test                        # unit + contract: 224 tests
-npm run test:server             # 161 — node:test, no database required
+npm test                        # unit + contract: 225 tests
+npm run test:server             # 162 — node:test, no database required
 npm run test:chain              # 63  — Hardhat, in-process chain
 npm run test:e2e                # 169 checks against the real API (needs MONGO_URI)
 ```
@@ -1521,6 +1521,13 @@ One complete lifecycle, plus the negative paths:
 | 8 | half-done work rejected by the AI, then a justified admin override, surfaced publicly |
 | 9 | every admin route refused to a citizen; forged tokens; cross-tenant reads as 404 |
 | 10 | prompt injection in a description; XSS; NoSQL operators; malformed ids and hashes |
+
+Both the unit suite and this run first verify the fixture images against the
+SHA-256 digests in `test/fixtures/hashes.json`, and against the keys in
+`aiResponses.js`. Responses are looked up by image hash and an unknown hash falls
+back to a *passing* verdict, so a re-saved PNG would not turn the build red — it
+would make the negative sections pass for the wrong reason. The check names the
+file and the fix, and the end-to-end run aborts before executing a single check.
 
 Emails are asserted by reading the preview directory fixture mode writes to. Note
 the event names are dotted (`report.received`, not `reportReceived`) — asserting on

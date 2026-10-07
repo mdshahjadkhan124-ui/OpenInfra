@@ -14,9 +14,27 @@ import { config } from '../src/config/env.js';
 import { analyseReportImage } from '../src/services/gemini.service.js';
 import { uploadImage, deleteImage } from '../src/services/upload.service.js';
 import { FIXTURE_RESPONSES } from '../src/services/__fixtures__/aiResponses.js';
+import { verifyFixtures } from './fixtures/verify.js';
 
 const FIXTURES = path.join(import.meta.dirname, 'fixtures');
 const img = (name) => fs.readFileSync(path.join(FIXTURES, name));
+
+/**
+ * First, because every other fixture assertion in the suite depends on it.
+ *
+ * Responses are keyed by the SHA-256 of the image bytes, and an unknown hash
+ * falls back to a PASSING verdict — so a re-saved PNG turns the negative tests
+ * into positive ones. The behavioural tests below would fail, but they would
+ * report it as `expected false, got true` and send the reader hunting for a bug
+ * in the AI gate instead of looking at the file they just touched.
+ */
+test('the fixture images still match their recorded digests', () => {
+  const { ok, problems, checked } = verifyFixtures();
+  assert.ok(checked > 0, 'hashes.json should list at least one fixture');
+  // The problems are already written as complete sentences naming the file and
+  // the fix, so they are the whole assertion message.
+  assert.ok(ok, ['', ...problems.map((p) => `  • ${p}`), ''].join('\n\n'));
+});
 
 test('fixture mode is on under NODE_ENV=test', () => {
   assert.equal(config.gemini.mock, true);
