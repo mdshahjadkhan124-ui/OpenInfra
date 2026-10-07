@@ -23,6 +23,21 @@ import { CATEGORY_LABEL, SEVERITY_TONE } from '../../lib/constants.js';
 const MAX_MB = 10;
 const ACCEPTED = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/heic', 'image/heif'];
 
+/**
+ * Banner titles by server error code.
+ *
+ * A failure the citizen cannot act on must not be headed "Please fix this".
+ * The backend distinguishes a misconfigured image store from a busy one from a
+ * rejected file (see services/upload.service.js), and the heading follows that
+ * distinction instead of blaming the user for all three.
+ */
+const ERROR_TITLES = {
+  IMAGE_STORAGE_MISCONFIGURED: 'Image uploads are down',
+  IMAGE_STORAGE_UNAVAILABLE: 'Could not reach image storage',
+  IMAGE_STORAGE_BUSY: 'Image storage is busy',
+  IMAGE_REJECTED: 'That photo could not be used',
+};
+
 /** What the user is told while they wait, in the order it actually happens. */
 const STAGES = [
   { at: 0, label: 'Uploading your photo…' },
@@ -66,11 +81,13 @@ export const ReportIssue = () => {
     if (!chosen) return;
 
     if (!ACCEPTED.includes(chosen.type.toLowerCase())) {
-      setError('That file type is not supported. Use a JPEG, PNG, WebP or HEIC photo.');
+      setError({ message: 'That file type is not supported. Use a JPEG, PNG, WebP or HEIC photo.' });
       return;
     }
     if (chosen.size > MAX_MB * 1024 * 1024) {
-      setError(`That photo is ${(chosen.size / 1024 / 1024).toFixed(1)} MB. The limit is ${MAX_MB} MB.`);
+      setError({
+        message: `That photo is ${(chosen.size / 1024 / 1024).toFixed(1)} MB. The limit is ${MAX_MB} MB.`,
+      });
       return;
     }
 
@@ -107,7 +124,7 @@ export const ReportIssue = () => {
     setError(null);
 
     if (!file) {
-      setError('A photo is required.');
+      setError({ message: 'A photo is required.' });
       return;
     }
 
@@ -132,7 +149,9 @@ export const ReportIssue = () => {
         toast.success('Report submitted', 'An official will review it shortly.');
       }
     } catch (err) {
-      setError(err.userMessage ?? 'Could not submit your report.');
+      // Keep the code: it decides whether this is the citizen's problem to fix
+      // or the server's to own, and the banner title says so either way.
+      setError({ message: err.userMessage ?? 'Could not submit your report.', code: err.code });
       toast.error('Submission failed', err.userMessage);
     } finally {
       setSubmitting(false);
@@ -417,9 +436,14 @@ export const ReportIssue = () => {
           </div>
         </Card>
 
+        {/*
+          The title has to match whose problem it is. "Please fix this" over a
+          message saying the server is misconfigured and retrying will not help
+          tells the citizen to fix something they cannot reach.
+        */}
         {error && (
-          <Alert tone="red" title="Please fix this">
-            {error}
+          <Alert tone="red" title={ERROR_TITLES[error.code] ?? 'Please fix this'}>
+            {error.message}
           </Alert>
         )}
 
