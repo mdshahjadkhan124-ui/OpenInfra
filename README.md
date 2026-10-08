@@ -2032,6 +2032,9 @@ In [`docs/`](docs/):
 - [`demo-script.md`](docs/demo-script.md) — a two-minute walkthrough, shot by shot.
 - [`resume-bullets.md`](docs/resume-bullets.md) — condensed for a CV, with the
   answers to the questions each bullet invites.
+- [`tech-stack-explained.md`](docs/tech-stack-explained.md) — every technology in
+  plain English, what it does and why it is here, plus an explicit list of what
+  this project does **not** use.
 
 ---
 
